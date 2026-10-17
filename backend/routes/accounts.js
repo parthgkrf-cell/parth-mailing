@@ -1,0 +1,188 @@
+const express = require('express');
+const router = express.Router();
+const { get, all, run } = require('../database');
+const { requireAuth } = require('../middleware/auth');
+const { verifyAccountConnection, cleanPassword } = require('../services/mailer');
+const { checkAndResetDailyQuota } = require('../services/gmailPolicy');
+
+// Helper to mask 16 digit app password
+function maskPassword(pass) {
+  if (!pass) return '';
+  const clean = cleanPassword(pass);
+  if (clean.length < 4) return '****';
+  return '**** **** **** ' + clean.slice(-4);
+}
+
+// List user's accounts
+router.get('/', requireAuth, async (req, res) => {
+  try {
+    const isMaster = req.user.role === 'master';
+    const query = isMaster && req.query.all === 'true'
+      ? 'SELECT a.*, u.name as user_name FROM smtp_accounts a LEFT JOIN users u ON a.user_id = u.id ORDER BY a.id DESC'
+      : 'SELECT * FROM smtp_accounts WHERE user_id = ? ORDER BY id DESC';
+    const params = isMaster && req.query.all === 'true' ? [] : [req.user.id];
+
+    const rows = await all(query, params);
+
+    // Check daily quotas for each
+    for (const r of rows) {
+      if (checkAndResetDailyQuota(r)) {
+        await run('UPDATE smtp_accounts SET sent_today = 0, last_reset_date = ? WHERE id = ?', [r.last_reset_date, r.id]);
+      }
+      r.masked_password = maskPassword(r.app_password);
+      delete r.app_password; // never send raw password to client
+    }
+
+    res.json({ accounts: rows });
+  } catch (err) {
+    console.error('Error fetching accounts:', err);
+    res.status(500).json({ error: 'Failed to fetch SMTP accounts.' });
+  }
+});
+
+// Add new Gmail / SMTP account
+router.post('/', requireAuth, async (req, res) => {
+  try {
+    const { label, email, app_password, host = 'smtp.gmail.com', port = 465, secure = 1, daily_limit = 450 } = req.body;
+
+    if (!label || !email || !app_password) {
+      return res.status(400).json({ error: 'Label, Gmail Email address, and 16-digit App Password are required.' });
+    }
+
+    const cleanEmail = email.toLowerCase().trim();
+    const cleanPass = cleanPassword(app_password);
+
+    if (cleanPass.length < 8) {
+      return res.status(400).json({ error: 'Google App Passwords are 16 characters long. Please check your passcode.' });
+    }
+
+    // Safety policy cap (never allow exceeding 500 on Gmail)
+    const safeDailyLimit = Math.min(Math.max(10, Number(daily_limit) || 450), 500);
+
+    // Perform live connection test first
+    const testAccount = {
+      label,
+      email: cleanEmail,
+      app_password: cleanPass,
+      host,
+      port: Number(port),
+      secure: Number(secure)
+    };
+
+    const testResult = await verifyAccountConnection(testAccount);
+    if (!testResult.success) {
+      return res.status(400).json({
+        error: `SMTP connection failed: ${testResult.error}`,
+        hint: 'Please ensure 2-Step Verification is turned ON in your Google Account and generate an App Password from https://myaccount.google.com/apppasswords'
+      });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    const result = await run(
+      `INSERT INTO smtp_accounts (user_id, label, email, app_password, host, port, secure, daily_limit, sent_today, last_reset_date, is_active, status)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 'ready')`,
+      [req.user.id, label.trim(), cleanEmail, cleanPass, host, Number(port), Number(secure), safeDailyLimit, today]
+    );
+
+    res.status(201).json({
+      message: 'Gmail account connected and verified successfully!',
+      accountId: result.lastID
+    });
+  } catch (err) {
+    console.error('Error adding account:', err);
+    res.status(500).json({ error: 'Failed to add SMTP account.' });
+  }
+});
+
+// Test connection of existing account
+router.post('/:id/test', requireAuth, async (req, res) => {
+  try {
+    const account = await get('SELECT * FROM smtp_accounts WHERE id = ?', [req.params.id]);
+    if (!account) return res.status(404).json({ error: 'Account not found.' });
+
+    if (account.user_id !== req.user.id && req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Unauthorized.' });
+    }
+
+    const result = await verifyAccountConnection(account);
+    if (result.success) {
+      await run('UPDATE smtp_accounts SET status = "ready", error_message = NULL WHERE id = ?', [account.id]);
+      res.json({ success: true, message: 'Google SMTP authentication verified successfully!' });
+    } else {
+      await run('UPDATE smtp_accounts SET status = "error", error_message = ? WHERE id = ?', [result.error, account.id]);
+      res.status(400).json({ success: false, error: result.error });
+    }
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to test connection.' });
+  }
+});
+
+// Toggle active or update settings
+router.put('/:id', requireAuth, async (req, res) => {
+  try {
+    const account = await get('SELECT * FROM smtp_accounts WHERE id = ?', [req.params.id]);
+    if (!account) return res.status(404).json({ error: 'Account not found.' });
+
+    if (account.user_id !== req.user.id && req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Unauthorized.' });
+    }
+
+    const { label, is_active, daily_limit, app_password } = req.body;
+    let newPass = account.app_password;
+    if (app_password && app_password.trim() && !app_password.includes('****')) {
+      newPass = cleanPassword(app_password);
+    }
+
+    const newLimit = daily_limit !== undefined ? Math.min(Math.max(10, Number(daily_limit)), 500) : account.daily_limit;
+    const newActive = is_active !== undefined ? (is_active ? 1 : 0) : account.is_active;
+    const newLabel = label !== undefined ? label.trim() : account.label;
+
+    await run(
+      'UPDATE smtp_accounts SET label = ?, is_active = ?, daily_limit = ?, app_password = ? WHERE id = ?',
+      [newLabel, newActive, newLimit, newPass, account.id]
+    );
+
+    res.json({ message: 'Account updated successfully!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to update account.' });
+  }
+});
+
+// Reset daily counter
+router.post('/:id/reset-quota', requireAuth, async (req, res) => {
+  try {
+    const account = await get('SELECT * FROM smtp_accounts WHERE id = ?', [req.params.id]);
+    if (!account) return res.status(404).json({ error: 'Account not found.' });
+
+    if (account.user_id !== req.user.id && req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Unauthorized.' });
+    }
+
+    const today = new Date().toISOString().split('T')[0];
+    await run('UPDATE smtp_accounts SET sent_today = 0, last_reset_date = ?, status = "ready", error_message = NULL WHERE id = ?', [today, account.id]);
+
+    res.json({ message: 'Daily quota reset successfully!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to reset quota.' });
+  }
+});
+
+// Delete account
+router.delete('/:id', requireAuth, async (req, res) => {
+  try {
+    const account = await get('SELECT * FROM smtp_accounts WHERE id = ?', [req.params.id]);
+    if (!account) return res.status(404).json({ error: 'Account not found.' });
+
+    if (account.user_id !== req.user.id && req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Unauthorized.' });
+    }
+
+    await run('DELETE FROM smtp_accounts WHERE id = ?', [account.id]);
+    res.json({ message: 'Account deleted successfully!' });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to delete account.' });
+  }
+});
+
+module.exports = router;
+

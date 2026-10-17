@@ -1,0 +1,197 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Parth Mailing</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect rx='8' width='32' height='32' fill='%23121a2b'/%3E%3Cpath d='M6 11h20v12H6z' fill='none' stroke='%237dd3c7' stroke-width='2'/%3E%3Cpath d='M6 11l10 8 10-8' fill='none' stroke='%238b9dff' stroke-width='2'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@360;460;560;650&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
+  <script src="https://accounts.google.com/gsi/client" async></script>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="ambient" aria-hidden="true">
+    <span class="blob b1"></span>
+    <span class="blob b2"></span>
+    <span class="blob b3"></span>
+  </div>
+
+  <section id="auth-screen" class="auth-screen">
+    <form id="login-form" class="auth-card glass">
+      <div class="brand">
+        <span class="mark"><i data-lucide="send"></i></span>
+        <div>
+          <strong id="auth-brand">Parth Mailing</strong>
+          <span id="auth-tag">Liquid glass desk</span>
+        </div>
+      </div>
+      <div id="auth-clock" class="clock" aria-label="Current date and time">
+        <strong>--:--:--</strong>
+        <span>Loading date</span>
+      </div>
+      <p id="relay-line" class="relay-line">Checking the relay…</p>
+      <label for="login-email">Work email</label>
+      <input id="login-email" class="input" type="email" autocomplete="username" placeholder="name@gr-conferences.com" required>
+      <p class="hint">Only @gr-conferences.com addresses can sign in. The code expires in 5 minutes.</p>
+      <div id="otp-panel" class="hidden">
+        <label for="login-code">Sign-in code</label>
+        <input id="login-code" class="input code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000">
+        <p id="otp-timer" class="hint">Code expires in 5:00</p>
+        <p id="dev-otp-note" class="note hidden"></p>
+      </div>
+      <label for="api-base">Relay address</label>
+      <input id="api-base" class="input" type="url" spellcheck="false" autocomplete="off">
+      <button id="login-submit" class="btn btn-primary" type="submit">Email me a code</button>
+      <button id="otp-resend" class="btn btn-ghost hidden" type="button" data-action="resend-otp">Resend code</button>
+      <div class="auth-split"><span>or</span></div>
+      <div id="google-signin"></div>
+      <p id="google-note" class="hint">Checking Google sign-in…</p>
+    </form>
+  </section>
+
+  <div id="app" class="app-shell hidden">
+    <aside class="sidebar glass">
+      <div class="brand">
+        <span class="mark"><i data-lucide="send"></i></span>
+        <div>
+          <strong id="brand-name">Parth</strong>
+          <span id="whoami">Mailing</span>
+        </div>
+      </div>
+      <nav class="nav" aria-label="Sections">
+        <button class="nav-btn active" type="button" data-action="nav" data-view="home"><i data-lucide="layout-dashboard"></i><span>Desk</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="recipients"><i data-lucide="file-spreadsheet"></i><span>Recipients</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="campaigns"><i data-lucide="clock"></i><span>Campaigns</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="history"><i data-lucide="history"></i><span>History</span></button>
+        <button class="nav-btn master-only" type="button" data-action="nav" data-view="master"><i data-lucide="shield"></i><span>Master</span></button>
+      </nav>
+      <div class="side-foot">
+        <div id="relay-pill" class="pill">Relay</div>
+        <div class="side-actions">
+          <button id="theme-toggle" class="icon-btn" type="button" data-action="toggle-theme" title="Theme"><i data-lucide="moon"></i></button>
+          <button class="icon-btn" type="button" data-action="logout" title="Sign out"><i data-lucide="log-out"></i></button>
+        </div>
+      </div>
+    </aside>
+    <div class="workspace">
+      <header class="topbar glass">
+        <div>
+          <h1 id="view-title">Desk</h1>
+          <p id="view-sub"></p>
+        </div>
+        <div class="top-actions">
+          <div id="live-clock" class="clock" aria-label="Current date and time">
+            <strong>--:--:--</strong>
+            <span>Loading date</span>
+          </div>
+          <span id="import-chip" class="pill hidden"></span>
+          <button id="compose-button" class="btn btn-primary" type="button" data-action="open-composer"><i data-lucide="pen-line"></i> <span>Compose</span></button>
+        </div>
+      </header>
+      <div id="view" class="view"></div>
+    </div>
+  </div>
+
+  <section id="composer" class="composer glass hidden" aria-label="Mail composer">
+    <header class="composer-bar" data-action="composer-bar">
+      <strong id="composer-title">New campaign</strong>
+      <div class="composer-controls">
+        <button type="button" data-action="composer-min" title="Minimize"><i data-lucide="minus"></i><span>Minimize</span></button>
+        <button type="button" data-action="composer-dock" title="Dock"><i data-lucide="minimize-2"></i><span>Dock</span></button>
+        <button type="button" data-action="composer-max" title="Full screen"><i data-lucide="maximize-2"></i><span>Full</span></button>
+        <button type="button" data-action="composer-close" title="Close"><i data-lucide="x"></i><span>Close</span></button>
+      </div>
+    </header>
+    <div class="composer-body">
+      <label class="line"><span>From</span><select id="from-select" class="input"></select></label>
+      <label class="line"><span>To</span><input id="to-input" class="input" placeholder="Extra addresses, comma separated"></label>
+      <div class="cc-row">
+        <button type="button" class="text-btn" data-action="toggle-cc">Cc / Bcc</button>
+      </div>
+      <div id="cc-fields" class="hidden">
+        <label class="line"><span>Cc</span><input id="cc-input" class="input"></label>
+        <label class="line"><span>Bcc</span><input id="bcc-input" class="input"></label>
+      </div>
+      <label class="line"><span>Subject</span><input id="subject-input" class="input" placeholder="Subject"></label>
+      <div id="toolbar" class="toolbar">
+        <button type="button" data-action="format" data-cmd="bold" title="Bold"><i data-lucide="bold"></i></button>
+        <button type="button" data-action="format" data-cmd="italic" title="Italic"><i data-lucide="italic"></i></button>
+        <button type="button" data-action="format" data-cmd="underline" title="Underline"><i data-lucide="underline"></i></button>
+        <button type="button" data-action="insert-link" title="Link"><i data-lucide="link"></i></button>
+        <button type="button" data-action="format" data-cmd="insertUnorderedList" title="Bullets"><i data-lucide="list"></i></button>
+        <button type="button" data-action="format" data-cmd="insertOrderedList" title="Numbered"><i data-lucide="list-ordered"></i></button>
+        <select id="font-name" class="input slim" aria-label="Font">
+          <option value="Arial">Arial</option>
+          <option value="Arial Black">Arial Black</option>
+          <option value="Calibri">Calibri</option>
+          <option value="Cambria">Cambria</option>
+          <option value="Candara">Candara</option>
+          <option value="Century Gothic">Century Gothic</option>
+          <option value="Comic Sans MS">Comic Sans MS</option>
+          <option value="Consolas">Consolas</option>
+          <option value="Courier New">Courier New</option>
+          <option value="Franklin Gothic Medium">Franklin Gothic</option>
+          <option value="Garamond">Garamond</option>
+          <option value="Georgia">Georgia</option>
+          <option value="Helvetica">Helvetica</option>
+          <option value="Impact">Impact</option>
+          <option value="Lucida Console">Lucida Console</option>
+          <option value="Lucida Sans Unicode">Lucida Sans</option>
+          <option value="Palatino Linotype">Palatino</option>
+          <option value="Segoe UI">Segoe UI</option>
+          <option value="Tahoma">Tahoma</option>
+          <option value="Times New Roman">Times New Roman</option>
+          <option value="Trebuchet MS">Trebuchet MS</option>
+          <option value="Verdana">Verdana</option>
+        </select>
+        <select id="font-size" class="input slim" aria-label="Font size">
+          <option value="2">12</option>
+          <option value="3" selected>14</option>
+          <option value="4">16</option>
+          <option value="5">18</option>
+          <option value="6">24</option>
+          <option value="7">32</option>
+        </select>
+        <label class="color-tool" title="Text color">A<input id="font-color" type="color" value="#d7efe8" aria-label="Text color"></label>
+        <label class="color-tool" title="Highlight color">H<input id="font-highlight" type="color" value="#fff3a0" aria-label="Highlight color"></label>
+        <button type="button" data-action="pick-image" title="Inline image"><i data-lucide="image"></i></button>
+        <input id="image-input" type="file" accept="image/*" class="hidden">
+      </div>
+      <div id="var-bar" class="var-bar"></div>
+      <div id="editor" class="editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write the message. Variable buttons personalize each row."></div>
+      <p id="merge-preview" class="preview-line">Add recipients to preview personalization.</p>
+      <div class="pace-grid">
+        <label>Delay min (s)<input id="delay-min" class="input" type="number" min="0" max="300" step="0.5" value="4"></label>
+        <label>Delay max (s)<input id="delay-max" class="input" type="number" min="0" max="300" step="0.5" value="12"></label>
+        <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="20"></label>
+        <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="2"></label>
+      </div>
+      <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
+      <div id="schedule-fields" class="schedule-grid hidden">
+        <input id="schedule-date" class="input" type="date">
+        <input id="schedule-time" class="input" type="time">
+        <select id="schedule-zone" class="input" aria-label="Timezone"></select>
+      </div>
+      <div class="attach-row">
+        <button type="button" class="btn btn-ghost" data-action="pick-attachment"><i data-lucide="paperclip"></i> Attach</button>
+        <input id="attach-input" type="file" multiple class="hidden">
+        <div id="attach-list" class="attach-list"></div>
+      </div>
+      <div class="composer-actions">
+        <button type="button" class="btn btn-ghost" data-action="composer-min">Minimize</button>
+        <button type="button" class="btn btn-ghost" data-action="composer-close">Close</button>
+        <span class="grow"></span>
+        <button type="button" class="btn btn-ghost" data-action="save-draft">Save draft</button>
+        <button type="button" class="btn btn-primary" id="send-button" data-action="send-campaign">Send campaign</button>
+      </div>
+    </div>
+  </section>
+
+  <div id="modal-root" class="modal-root hidden"></div>
+  <div id="toasts" aria-live="polite"></div>
+  <script src="app.js"></script>
+</body>
+</html>

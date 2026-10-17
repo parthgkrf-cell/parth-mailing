@@ -1,0 +1,230 @@
+/* Spreadsheet parser. Runs off the UI thread so large lists do not freeze the desk. */
+
+try {
+  importScripts("xlsx.js");
+} catch (error) {
+  try {
+    importScripts("https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js");
+  } catch (fallbackError) {
+    self.xlsxMissing = true;
+  }
+}
+
+const EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
+const HEADER_SETS = {
+  email: new Set(["email", "e-mail", "email address", "emailaddress", "mail", "recipient", "recipient email", "recipientemail", "to"]),
+  first: new Set(["firstname", "first name", "first", "given name", "givenname", "name"]),
+  last: new Set(["lastname", "last name", "last", "surname", "family name", "familyname"]),
+  company: new Set(["company", "organization", "organisation", "org", "affiliation", "institution"]),
+  custom: new Set(["custom1", "custom", "note", "tag", "segment"]),
+};
+
+function normHeader(value) {
+  return String(value || "").replace(/^\uFEFF/, "").trim().toLowerCase();
+}
+
+function cleanEmail(value) {
+  let text = String(value || "").replace(/\u00a0/g, "").replace(/\u200b/g, "").trim().toLowerCase();
+  const wrapped = text.match(/<([^>]+)>/);
+  if (wrapped) text = wrapped[1].trim().toLowerCase();
+  return text;
+}
+
+function cell(row, index) {
+  if (index < 0 || index == null) return "";
+  const value = row[index];
+  return value == null ? "" : String(value).trim().slice(0, 5000);
+}
+
+function buildMapper(headers) {
+  const mapper = { email: -1, first: -1, last: -1, company: -1, custom: -1, fields: [] };
+  headers.forEach((header, index) => {
+    const name = normHeader(header);
+    if (!name) return;
+    if (mapper.email < 0 && HEADER_SETS.email.has(name)) mapper.email = index;
+    else if (mapper.first < 0 && HEADER_SETS.first.has(name)) mapper.first = index;
+    else if (mapper.last < 0 && HEADER_SETS.last.has(name)) mapper.last = index;
+    else if (mapper.company < 0 && HEADER_SETS.company.has(name)) mapper.company = index;
+    else if (mapper.custom < 0 && HEADER_SETS.custom.has(name)) mapper.custom = index;
+    else mapper.fields.push(index);
+  });
+  return mapper;
+}
+
+function detectEmailColumn(sampleRows, width) {
+  let best = -1;
+  let bestScore = 0;
+  for (let column = 0; column < width; column += 1) {
+    let score = 0;
+    for (const row of sampleRows) {
+      if (EMAIL_RE.test(cleanEmail(row[column]))) score += 1;
+    }
+    if (score > bestScore) {
+      bestScore = score;
+      best = column;
+    }
+  }
+  return bestScore > 0 ? best : -1;
+}
+
+function createSink() {
+  const seen = new Set();
+  const columns = new Set(["FirstName", "LastName", "Company", "Custom1", "Email"]);
+  const stats = { scanned: 0, valid: 0, invalid: 0, duplicates: 0 };
+  let batch = [];
+  function flush() {
+    if (!batch.length) return;
+    self.postMessage({ type: "chunk", rows: batch });
+    batch = [];
+  }
+  function push(row) {
+    stats.scanned += 1;
+    const email = cleanEmail(row.email);
+    if (!EMAIL_RE.test(email)) {
+      stats.invalid += 1;
+    } else if (seen.has(email)) {
+      stats.duplicates += 1;
+    } else {
+      seen.add(email);
+      stats.valid += 1;
+      row.email = email;
+      Object.keys(row.fields || {}).forEach((key) => columns.add(key));
+      batch.push(row);
+      if (batch.length >= 4000) flush();
+    }
+    if (stats.scanned % 4000 === 0) {
+      self.postMessage({ type: "progress", scanned: stats.scanned, valid: stats.valid });
+    }
+  }
+  return { push, flush, stats, columns };
+}
+
+function rowFrom(values, mapper, headers, extraFields) {
+  const fields = Object.assign({}, extraFields || {});
+  mapper.fields.forEach((index) => {
+    const key = String(headers[index] || "").trim();
+    if (!key) return;
+    fields[key] = cell(values, index);
+  });
+  return {
+    email: cell(values, mapper.email),
+    first_name: cell(values, mapper.first),
+    last_name: cell(values, mapper.last),
+    company: cell(values, mapper.company),
+    custom1: cell(values, mapper.custom),
+    fields,
+  };
+}
+
+function consumeMatrix(matrix, sheetName, sheetCount, sink) {
+  if (!matrix.length) return;
+  const headers = (matrix[0] || []).map((value) => String(value || "").trim());
+  const mapper = buildMapper(headers);
+  if (mapper.email < 0) mapper.email = detectEmailColumn(matrix.slice(1, 30), headers.length);
+  const extra = sheetCount > 1 ? { Sheet: sheetName } : null;
+  for (let index = 1; index < matrix.length; index += 1) {
+    const values = matrix[index] || [];
+    if (!values.some((value) => String(value || "").trim())) continue;
+    sink.push(rowFrom(values, mapper, headers, extra));
+  }
+}
+
+async function parseCsv(file, sink) {
+  const reader = file.stream().getReader();
+  const decoder = new TextDecoder("utf-8");
+  const ctx = { row: [], cur: "", quotes: false, headers: null, mapper: null, line: 0, sample: [] };
+  const finishRow = () => {
+    ctx.row.push(ctx.cur);
+    ctx.cur = "";
+    const values = ctx.row;
+    ctx.row = [];
+    if (values.every((value) => !String(value || "").trim())) return;
+    if (!ctx.headers) {
+      ctx.headers = values.map((value) => String(value || "").replace(/^\uFEFF/, "").trim());
+      ctx.mapper = buildMapper(ctx.headers);
+      return;
+    }
+    if (ctx.mapper.email < 0) {
+      ctx.sample.push(values);
+      if (ctx.sample.length >= 25) {
+        ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length);
+        ctx.sample.forEach((sample) => sink.push(rowFrom(sample, ctx.mapper, ctx.headers)));
+        ctx.sample = [];
+      }
+      return;
+    }
+    sink.push(rowFrom(values, ctx.mapper, ctx.headers));
+  };
+  const feed = (chunk) => {
+    for (let index = 0; index < chunk.length; index += 1) {
+      const char = chunk[index];
+      if (ctx.quotes) {
+        if (char === '"') {
+          if (chunk[index + 1] === '"') {
+            ctx.cur += '"';
+            index += 1;
+          } else ctx.quotes = false;
+        } else ctx.cur += char;
+      } else if (char === '"') ctx.quotes = true;
+      else if (char === ",") {
+        ctx.row.push(ctx.cur);
+        ctx.cur = "";
+      } else if (char === "\n") finishRow();
+      else if (char !== "\r") ctx.cur += char;
+    }
+  };
+  let first = true;
+  while (true) {
+    const step = await reader.read();
+    let text = decoder.decode(step.value || new Uint8Array(), { stream: !step.done });
+    if (first) {
+      text = text.replace(/^\uFEFF/, "");
+      first = false;
+    }
+    feed(text);
+    if (step.done) break;
+  }
+  if (ctx.cur || ctx.row.length) finishRow();
+  if (ctx.mapper && ctx.mapper.email < 0 && ctx.sample.length) {
+    ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length);
+    ctx.sample.forEach((values) => sink.push(rowFrom(values, ctx.mapper, ctx.headers)));
+    ctx.sample = [];
+  }
+}
+
+async function parseWorkbook(file, sink) {
+  if (typeof XLSX === "undefined") {
+    throw new Error("The Excel parser did not load. CSV files still work offline.");
+  }
+  const buffer = await file.arrayBuffer();
+  const book = XLSX.read(buffer, { type: "array" });
+  const names = book.SheetNames.slice();
+  for (const name of names) {
+    const sheet = book.Sheets[name];
+    const matrix = XLSX.utils.sheet_to_json(sheet, { header: 1, raw: false, defval: "" });
+    delete book.Sheets[name];
+    consumeMatrix(matrix, name, names.length, sink);
+  }
+}
+
+self.onmessage = async (event) => {
+  const file = event.data && event.data.file;
+  if (!file) {
+    self.postMessage({ type: "error", message: "No file was received." });
+    return;
+  }
+  const sink = createSink();
+  try {
+    const name = String(file.name || "").toLowerCase();
+    if (name.endsWith(".csv") || name.endsWith(".txt")) await parseCsv(file, sink);
+    else await parseWorkbook(file, sink);
+    sink.flush();
+    self.postMessage({
+      type: "done",
+      stats: sink.stats,
+      columns: Array.from(sink.columns),
+    });
+  } catch (error) {
+    self.postMessage({ type: "error", message: error.message || "Could not read that file." });
+  }
+};

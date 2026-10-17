@@ -1,0 +1,11 @@
+{
+  "name": "parth-mailing",
+  "version": "1.0.0",
+  "description": "Parth Mailing - Google Policy Compliant Email Scheduler & Multi-Account WebApp",
+  "scripts": {
+    "start-backend": "cd backend && node server.js",
+    "start-frontend": "cd frontend && npm run dev",
+    "build": "cd frontend && npm run build"
+  }
+}
+

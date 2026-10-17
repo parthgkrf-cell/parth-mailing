@@ -1,0 +1,15 @@
+__pycache__/
+*.pyc
+node_modules/
+data/
+dist/
+build/
+*.spec
+*.db
+.env
+.env.*
+*.log
+config/config.json
+config/drive_service_account.json
+*.xlsx
+!frontend/xlsx.js
