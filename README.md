@@ -8,7 +8,7 @@ Liquid-glass mailing desk for `@gr-conferences.com`, with a local relay that kee
 2. Double-click `Start-Mailing-Suite.bat`, or run `python server.py` from the `backend` folder.
 3. Open the address the relay prints, usually `http://127.0.0.1:8787/`.
 4. Sign in with a `@gr-conferences.com` address. Until the master SMTP password is set, the 6-digit code appears on the sign-in screen and in the relay window. It expires in 5 minutes.
-5. The master address in a fresh config is `master@gr-conferences.com`.
+5. The master address in a fresh config is `vekariyaparth127@gmail.com`.
 
 Edit `config/config.json` after the first launch:
 
@@ -31,11 +31,11 @@ Edit `config/config.json` after the first launch:
 
 ## GitHub
 
-The project repository is private. Mailbox passwords, the live `config/config.json`, campaign files, and the relay database stay on this computer and are not committed.
+The project repository is public (`parthgkrf-cell/parth-mailing`). Mailbox passwords, the live `config/config.json`, campaign files, and the relay database stay on this computer and are not committed.
 
-Pushing the `main` branch runs `.github/workflows/pages.yml`. That workflow publishes only the static desk (`frontend/index.html`, `app.js`, `style.css`, and `worker.js`) to GitHub Pages.
+Pushing `main` runs `.github/workflows/pages.yml` and publishes the static desk. In the repo, **Settings → Pages** should use Source **GitHub Actions**.
 
-A GitHub Pages site is HTTPS, and browsers block calls from it to a local `http://` relay. The supported desk is the page served by the relay itself at `http://127.0.0.1:8787/`.
+The workflow copies `frontend/index.html`, `app.js`, `style.css`, `worker.js`, and `xlsx.js`. A GitHub Pages site is HTTPS, and browsers block calls from it to a local `http://` relay. The supported desk is the page served by the relay itself at `http://127.0.0.1:8787/`.
 
 ## Locked executable
 

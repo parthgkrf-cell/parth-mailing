@@ -13,3 +13,9 @@ config/config.json
 config/drive_service_account.json
 *.xlsx
 !frontend/xlsx.js
+Thumbs.db
+.DS_Store
+*.pem
+*.p12
+credentials.json
+token.json

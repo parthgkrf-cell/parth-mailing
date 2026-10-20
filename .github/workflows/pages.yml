@@ -12,25 +12,30 @@ permissions:
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
+    if: ${{ github.event.repository.private == false }}
     runs-on: ubuntu-latest
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - name: Check out the project
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Prepare the static desk
         run: |
           mkdir -p site
-          cp frontend/index.html frontend/app.js frontend/style.css frontend/worker.js site/
+          cp frontend/index.html frontend/app.js frontend/style.css frontend/worker.js frontend/xlsx.js site/
+          if [ -f frontend/public/favicon.svg ]; then cp frontend/public/favicon.svg site/; fi
+          touch site/.nojekyll
 
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - name: Upload the desk
         uses: actions/upload-pages-artifact@v3
@@ -40,3 +45,12 @@ jobs:
       - name: Deploy
         id: deployment
         uses: actions/deploy-pages@v4
+
+  skip-private:
+    if: ${{ github.event.repository.private == true }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: GitHub Pages is not available on this private plan
+        run: |
+          echo "This repository is private. GitHub Free does not host Pages for private repos."
+          echo "Keep the relay on this computer, or make the repository public and re-run this workflow."
