@@ -2297,18 +2297,18 @@ const actions = {
   },
   "send-campaign"() { return sendCampaign("send"); },
   async "request-sender"(el) {
-    await api("/api/senders/request", { method: "POST", body: JSON.stringify({ sender_id: el.dataset.id }) });
+    const data = await api("/api/senders/request", { method: "POST", body: JSON.stringify({ sender_id: el.dataset.id }) });
     await refreshCatalog();
     renderView();
-    toast("Request sent. Admin will get an email.");
+    toast(data.emailed ? "Request sent. The admin got an email." : "Request saved. The approval email could not be sent.");
   },
   async "request-mailbox"() {
     const email = (document.getElementById("request-mailbox") || {}).value || "";
     if (!email.trim()) throw new Error("Type the sending email you want to use.");
-    await api("/api/senders/request", { method: "POST", body: JSON.stringify({ email: email.trim() }) });
+    const data = await api("/api/senders/request", { method: "POST", body: JSON.stringify({ email: email.trim() }) });
     await refreshCatalog();
     renderView();
-    toast("Request sent. Admin will get an email.");
+    toast(data.emailed ? "Request sent. The admin got an email." : "Request saved. The approval email could not be sent.");
   },
   async "campaign-control"(el) {
     await api(`/api/campaigns/${el.dataset.id}/control`, { method: "POST", body: JSON.stringify({ action: el.dataset.op }) });

@@ -3144,30 +3144,46 @@ def send_otp_email(target, code, purpose="login"):
 
 
 def notify_admin_mailbox_request(user_email, display_name, mailbox):
-    master = prepare_sender(load_config().get("master_smtp") or {})
-    if not master or not master["password"]:
+    sender = otp_sender() or refresh_otp_sender()
+    from_address = OTP_FROM
+    if not sender or not sender.get("password"):
+        sender = prepare_sender(load_config().get("master_smtp") or {})
+        from_address = (sender or {}).get("user") or ADMIN_EMAIL
+    if not sender or not sender.get("password") or not sender.get("host"):
         log(f"Mailbox request from {user_email} for {mailbox} (admin email not sent: mailbox not ready)")
-        return
+        return False
     who = display_name or user_email
-    subject = f"Mailbox request: {mailbox}"
+    subject = f"Approve mailbox access: {mailbox}"
     body = f"""<!DOCTYPE html><html><body style="margin:0;background:#0e1524;padding:28px;font-family:Segoe UI,Arial,sans-serif;">
 <div style="max-width:480px;margin:0 auto;padding:28px;border-radius:24px;background:#172033;border:1px solid rgba(255,255,255,0.15);color:#f4f7fb;">
 <p style="letter-spacing:.16em;text-transform:uppercase;font-size:12px;color:#9fb0c9;margin:0 0 8px;">Parth Mailing</p>
-<h1 style="font-size:22px;font-weight:600;margin:0 0 8px;">Sending mailbox request</h1>
+<h1 style="font-size:22px;font-weight:600;margin:0 0 8px;">Access approval queue</h1>
 <p style="color:#c5d0e0;line-height:1.5;">{html.escape(who)} ({html.escape(user_email)}) asked to send from <strong>{html.escape(mailbox)}</strong>.</p>
-<p style="color:#c5d0e0;line-height:1.5;">Open Admin on the desk to approve or deny, and set the daily limit (Gmail 400, Workspace 1800 by default).</p>
+<p style="color:#c5d0e0;line-height:1.5;">Open the desk, then Admin, then Access approval queue. Approve or deny it there.</p>
 </div></body></html>"""
     message = MIMEMultipart("alternative")
-    message["From"] = build_aligned_from(master["display_name"] or "Parth Mailing", master["user"])
+    message["From"] = build_aligned_from("Parth Mailing", from_address)
     message["To"] = ADMIN_EMAIL
     message["Subject"] = subject
     message["Date"] = email.utils.formatdate(localtime=True)
-    message.attach(MIMEText(f"{who} ({user_email}) requested sending mailbox {mailbox}.", "plain", "utf-8"))
+    message["Message-ID"] = email.utils.make_msgid(domain="gr-conferences.com")
+    message.attach(MIMEText(
+        f"{who} ({user_email}) asked to send from {mailbox}. Open Admin, then Access approval queue.",
+        "plain",
+        "utf-8",
+    ))
     message.attach(MIMEText(body, "html", "utf-8"))
     try:
-        send_with_pool(master, message, [ADMIN_EMAIL])
+        deliver_fresh_smtp(sender, message, ADMIN_EMAIL)
     except Exception as exc:
-        log(f"Admin request notice failed: {exc}")
+        raw = str(exc)
+        hidden = sender.get("password") or ""
+        if hidden and hidden in raw:
+            raw = raw.replace(hidden, "[redacted]")
+        log(f"Admin request notice failed: {type(exc).__name__}: {raw[:240]}")
+        return False
+    log(f"Approval email sent to {ADMIN_EMAIL} for {user_email} -> {mailbox}")
+    return True
 
 
 def ensure_user(conn, email):
@@ -4049,8 +4065,8 @@ class Handler(BaseHTTPRequestHandler):
             row = conn.execute("SELECT display_name FROM users WHERE email=?", (user["email"],)).fetchone()
             display = str((row["display_name"] if row else "") or "")
             add_audit(conn, user["email"], "sender_requested", mailbox)
-        notify_admin_mailbox_request(user["email"], display, mailbox)
-        self.send_json(200, {"ok": True, "status": "pending", "mailbox": mailbox})
+        emailed = notify_admin_mailbox_request(user["email"], display, mailbox)
+        self.send_json(200, {"ok": True, "status": "pending", "mailbox": mailbox, "emailed": emailed})
 
     def save_draft(self, user, data):
         payload = data.get("payload")
