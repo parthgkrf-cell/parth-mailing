@@ -9,7 +9,7 @@ import urllib.request
 import zipfile
 
 BASE = "http://127.0.0.1:8787"
-MASTER = "master@gr-conferences.com"
+MASTER = "vekariyaparth127@gmail.com"
 USER = "agent.user@gr-conferences.com"
 LOCKED = "locked.user@gr-conferences.com"
 
@@ -47,6 +47,10 @@ def expect(condition, message):
 
 
 def login(email):
+    if email == MASTER:
+        status, session = request("POST", "/api/auth/admin", {"email": email})
+        expect(status == 200 and session.get("token"), f"Admin sign-in failed: {session}")
+        return session["token"], session["user"]["role"]
     for _ in range(3):
         status, data = request("POST", "/api/auth/request-otp", {"email": email})
         if status == 429:

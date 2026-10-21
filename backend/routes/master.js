@@ -50,11 +50,14 @@ router.get('/users', async (req, res) => {
     const users = await all(`
       SELECT 
         u.id, u.name, u.email, u.role, u.is_active, u.is_approved, u.created_at,
+        COUNT(DISTINCT a.id) as owned_accounts_count,
+        COUNT(DISTINCT aa.smtp_account_id) as assigned_accounts_count,
         COUNT(DISTINCT a.id) as accounts_count,
         COUNT(DISTINCT s.id) as schedules_count,
         COUNT(DISTINCT l.id) as emails_sent_count
       FROM users u
       LEFT JOIN smtp_accounts a ON u.id = a.user_id
+      LEFT JOIN account_assignments aa ON u.id = aa.user_id
       LEFT JOIN scheduled_emails s ON u.id = s.user_id
       LEFT JOIN email_logs l ON u.id = l.user_id AND l.status = 'sent'
       GROUP BY u.id
@@ -193,6 +196,45 @@ router.get('/logs', async (req, res) => {
     res.json({ logs });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch global logs.' });
+  }
+});
+
+router.get('/users/:id/accounts', async (req, res) => {
+  try {
+    const assigned = await all(
+      'SELECT smtp_account_id FROM account_assignments WHERE user_id = ?',
+      [req.params.id]
+    );
+    const accounts = await all('SELECT id, label, email, from_name, is_active FROM smtp_accounts ORDER BY id DESC');
+    res.json({
+      account_ids: assigned.map((row) => row.smtp_account_id),
+      accounts
+    });
+  } catch (err) {
+    res.status(500).json({ error: 'Failed to fetch account assignments.' });
+  }
+});
+
+router.put('/users/:id/accounts', async (req, res) => {
+  try {
+    const user = await get('SELECT id, role FROM users WHERE id = ?', [req.params.id]);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    const ids = Array.isArray(req.body.account_ids)
+      ? [...new Set(req.body.account_ids.map((id) => Number(id)).filter((id) => id > 0))]
+      : [];
+    await run('DELETE FROM account_assignments WHERE user_id = ?', [user.id]);
+    for (const accountId of ids) {
+      const account = await get('SELECT id FROM smtp_accounts WHERE id = ?', [accountId]);
+      if (!account) continue;
+      await run(
+        'INSERT OR IGNORE INTO account_assignments (user_id, smtp_account_id) VALUES (?, ?)',
+        [user.id, accountId]
+      );
+    }
+    res.json({ message: 'Sending accounts assigned.', account_ids: ids });
+  } catch (err) {
+    console.error('Assignment error:', err);
+    res.status(500).json({ error: 'Failed to assign sending accounts.' });
   }
 });
 

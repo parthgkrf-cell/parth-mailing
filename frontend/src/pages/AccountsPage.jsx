@@ -13,6 +13,7 @@ export default function AccountsPage() {
 
   // Form states
   const [label, setLabel] = useState('');
+  const [fromName, setFromName] = useState('');
   const [email, setEmail] = useState('');
   const [appPassword, setAppPassword] = useState('');
   const [port, setPort] = useState('465');
@@ -50,6 +51,7 @@ export default function AccountsPage() {
     try {
       await api.addAccount({
         label,
+        from_name: fromName || label,
         email,
         app_password: appPassword,
         host: 'smtp.gmail.com',
@@ -61,6 +63,7 @@ export default function AccountsPage() {
       setTimeout(() => {
         setShowAddModal(false);
         setLabel('');
+        setFromName('');
         setEmail('');
         setAppPassword('');
         setFormSuccess('');
@@ -342,6 +345,16 @@ export default function AccountsPage() {
               </div>
 
               <div>
+                <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
+                  Sender display name
+                </label>
+                <input
+                  type="text"
+                  value={fromName}
+                  onChange={(e) => setFromName(e.target.value)}
+                  placeholder="Shown as From name, Excel can override"
+                  className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white mb-3"
+                />
                 <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1">
                   Gmail Email Address
                 </label>

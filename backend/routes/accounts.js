@@ -4,6 +4,7 @@ const { get, all, run } = require('../database');
 const { requireAuth } = require('../middleware/auth');
 const { verifyAccountConnection, cleanPassword } = require('../services/mailer');
 const { checkAndResetDailyQuota } = require('../services/gmailPolicy');
+const { listSendableAccounts } = require('../services/campaign');
 
 // Helper to mask 16 digit app password
 function maskPassword(pass) {
@@ -17,12 +18,18 @@ function maskPassword(pass) {
 router.get('/', requireAuth, async (req, res) => {
   try {
     const isMaster = req.user.role === 'master';
-    const query = isMaster && req.query.all === 'true'
-      ? 'SELECT a.*, u.name as user_name FROM smtp_accounts a LEFT JOIN users u ON a.user_id = u.id ORDER BY a.id DESC'
-      : 'SELECT * FROM smtp_accounts WHERE user_id = ? ORDER BY id DESC';
-    const params = isMaster && req.query.all === 'true' ? [] : [req.user.id];
-
-    const rows = await all(query, params);
+    let rows;
+    if (isMaster && req.query.all === 'true') {
+      rows = await all(`
+        SELECT a.*, u.name as user_name FROM smtp_accounts a
+        LEFT JOIN users u ON a.user_id = u.id
+        ORDER BY a.id DESC
+      `);
+    } else if (isMaster) {
+      rows = await all('SELECT * FROM smtp_accounts ORDER BY id DESC');
+    } else {
+      rows = await listSendableAccounts(req.user);
+    }
 
     // Check daily quotas for each
     for (const r of rows) {
@@ -43,7 +50,10 @@ router.get('/', requireAuth, async (req, res) => {
 // Add new Gmail / SMTP account
 router.post('/', requireAuth, async (req, res) => {
   try {
-    const { label, email, app_password, host = 'smtp.gmail.com', port = 465, secure = 1, daily_limit = 450 } = req.body;
+    if (req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Only Master Admin can add sending accounts. Ask admin to assign an account to you.' });
+    }
+    const { label, email, app_password, host = 'smtp.gmail.com', port = 465, secure = 1, daily_limit = 450, from_name } = req.body;
 
     if (!label || !email || !app_password) {
       return res.status(400).json({ error: 'Label, Gmail Email address, and 16-digit App Password are required.' });
@@ -79,9 +89,9 @@ router.post('/', requireAuth, async (req, res) => {
 
     const today = new Date().toISOString().split('T')[0];
     const result = await run(
-      `INSERT INTO smtp_accounts (user_id, label, email, app_password, host, port, secure, daily_limit, sent_today, last_reset_date, is_active, status)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 'ready')`,
-      [req.user.id, label.trim(), cleanEmail, cleanPass, host, Number(port), Number(secure), safeDailyLimit, today]
+      `INSERT INTO smtp_accounts (user_id, label, email, app_password, host, port, secure, daily_limit, sent_today, last_reset_date, is_active, status, from_name)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?, 1, 'ready', ?)`,
+      [req.user.id, label.trim(), cleanEmail, cleanPass, host, Number(port), Number(secure), safeDailyLimit, today, from_name || label.trim()]
     );
 
     res.status(201).json({

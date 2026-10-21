@@ -49,7 +49,8 @@ export const AuthProvider = ({ children }) => {
     setUser(null);
   };
 
-  const isMaster = user?.role === 'master';
+  const role = String(user?.role || '').trim().toLowerCase();
+  const isMaster = role === 'master' || role === 'role_master' || role === 'admin';
 
   return (
     <AuthContext.Provider value={{ user, token, loading, login, register, logout, isMaster }}>

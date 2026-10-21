@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
+import { useAuth } from '../context/AuthContext';
 import { 
   ShieldCheck, Users, Sliders, Mail, ListFilter, CheckCircle, 
   AlertTriangle, RefreshCw, Trash2, Power, UserCheck, Settings, Save, Lock
 } from 'lucide-react';
 
 export default function MasterPanelPage() {
+  const { isMaster } = useAuth();
   const [subTab, setSubTab] = useState('users'); // 'users', 'policy', 'fleet', 'logs'
   const [stats, setStats] = useState(null);
   const [users, setUsers] = useState([]);
@@ -23,10 +25,14 @@ export default function MasterPanelPage() {
   const [enforceUnsub, setEnforceUnsub] = useState('1');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState('');
+  const [assignUser, setAssignUser] = useState(null);
+  const [assignableAccounts, setAssignableAccounts] = useState([]);
+  const [selectedAccountIds, setSelectedAccountIds] = useState([]);
 
   useEffect(() => {
+    if (!isMaster) return;
     loadMasterData();
-  }, [subTab]);
+  }, [subTab, isMaster]);
 
   const loadMasterData = async () => {
     try {
@@ -94,6 +100,28 @@ export default function MasterPanelPage() {
     }
   };
 
+  const openAssign = async (user) => {
+    try {
+      const res = await api.getUserAccounts(user.id);
+      setAssignUser(user);
+      setAssignableAccounts(res.accounts || []);
+      setSelectedAccountIds(res.account_ids || []);
+    } catch (err) {
+      alert(err.message || 'Failed to load assignments');
+    }
+  };
+
+  const saveAssign = async () => {
+    if (!assignUser) return;
+    try {
+      await api.assignUserAccounts(assignUser.id, selectedAccountIds);
+      setAssignUser(null);
+      loadMasterData();
+    } catch (err) {
+      alert(err.message || 'Failed to assign accounts');
+    }
+  };
+
   const handleDeleteUser = async (id) => {
     if (!window.confirm('Are you sure? This will delete the user and all their connected accounts, drafts, and schedules!')) return;
     try {
@@ -125,6 +153,8 @@ export default function MasterPanelPage() {
       setSavingSettings(false);
     }
   };
+
+  if (!isMaster) return null;
 
   return (
     <div className="max-w-6xl mx-auto space-y-6">
@@ -296,18 +326,28 @@ export default function MasterPanelPage() {
                         {u.is_active ? 'Active' : 'Suspended'}
                       </button>
                     </td>
-                    <td className="py-3 px-4 text-slate-300">{u.accounts_count} accounts</td>
+                    <td className="py-3 px-4 text-slate-300">{u.assigned_accounts_count || 0} assigned</td>
                     <td className="py-3 px-4 text-slate-300">{u.emails_sent_count} sent</td>
                     <td className="py-3 px-4 text-right">
-                      {u.role !== 'master' && (
-                        <button
-                          onClick={() => handleDeleteUser(u.id)}
-                          className="p-1.5 text-slate-400 hover:text-red-400 transition-colors rounded-lg hover:bg-slate-800"
-                          title="Delete User"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      )}
+                      <div className="flex justify-end gap-1">
+                        {u.role !== 'master' && (
+                          <button
+                            onClick={() => openAssign(u)}
+                            className="px-2 py-1 text-[10px] font-bold bg-indigo-600/20 text-indigo-300 border border-indigo-500/30 rounded-lg"
+                          >
+                            Assign mailboxes
+                          </button>
+                        )}
+                        {u.role !== 'master' && (
+                          <button
+                            onClick={() => handleDeleteUser(u.id)}
+                            className="p-1.5 text-slate-400 hover:text-red-400 transition-colors rounded-lg hover:bg-slate-800"
+                            title="Delete User"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -547,6 +587,43 @@ export default function MasterPanelPage() {
                 ))}
               </tbody>
             </table>
+          </div>
+        </div>
+      )}
+
+      {assignUser && (
+        <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-lg w-full p-5">
+            <h3 className="font-bold text-white mb-1">Assign sending accounts</h3>
+            <p className="text-xs text-slate-400 mb-4">
+              {assignUser.name} can only send with the mailboxes you tick here.
+            </p>
+            <div className="max-h-72 overflow-y-auto space-y-2">
+              {assignableAccounts.length === 0 && (
+                <p className="text-sm text-slate-500">Add SMTP accounts in Sending Accounts first.</p>
+              )}
+              {assignableAccounts.map((account) => (
+                <label key={account.id} className="flex items-start gap-2 text-sm bg-slate-950/60 border border-slate-800 rounded-xl p-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedAccountIds.includes(account.id)}
+                    onChange={(e) => {
+                      setSelectedAccountIds((ids) =>
+                        e.target.checked ? [...ids, account.id] : ids.filter((id) => id !== account.id)
+                      );
+                    }}
+                  />
+                  <span>
+                    <span className="text-white font-semibold">{account.from_name || account.label}</span>
+                    <span className="block text-xs text-slate-400 font-mono">{account.email}</span>
+                  </span>
+                </label>
+              ))}
+            </div>
+            <div className="flex justify-end gap-2 mt-4">
+              <button onClick={() => setAssignUser(null)} className="px-3 py-2 text-xs bg-slate-800 rounded-lg">Cancel</button>
+              <button onClick={saveAssign} className="px-3 py-2 text-xs bg-indigo-600 rounded-lg font-semibold">Save assignment</button>
+            </div>
           </div>
         </div>
       )}

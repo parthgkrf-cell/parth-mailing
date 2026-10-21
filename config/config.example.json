@@ -2,7 +2,7 @@
   "notes": [
     "Copy this file to config.json. The relay does that automatically on first launch.",
     "Only addresses ending with domain_suffix can sign in.",
-    "Leave SMTP passwords empty to run in simulation mode. Sign-in codes then appear on the sign-in screen.",
+    "Leave SMTP passwords empty to run in simulation mode. Sign-in codes are emailed only after the admin app password is saved.",
     "Put real mailbox passwords here on the machine that runs the relay. They are never sent to the browser.",
     "Set dispatch_mode to live after the master SMTP password is filled in.",
     "Share a Google Drive folder with the service account email, then set google_drive.enabled to true."
@@ -14,7 +14,7 @@
   "dispatch_mode": "auto",
   "other_daily_cap": 500,
   "master_emails": [
-    "master@gr-conferences.com"
+    "vekariyaparth127@gmail.com"
   ],
   "server": {
     "host": "127.0.0.1",
@@ -24,26 +24,26 @@
     "host": "smtp.gmail.com",
     "port": 465,
     "secure": "ssl",
-    "user": "master@gr-conferences.com",
+    "user": "vekariyaparth127@gmail.com",
     "password": "",
     "from_name": "Parth Mailing"
   },
   "senders": [
     {
-      "id": "info",
-      "email": "info@gr-conferences.com",
-      "display_name": "GR Conferences",
+      "id": "admin",
+      "email": "vekariyaparth127@gmail.com",
+      "display_name": "Parth Mailing",
       "host": "smtp.gmail.com",
       "port": 465,
       "secure": "ssl",
-      "user": "info@gr-conferences.com",
+      "user": "vekariyaparth127@gmail.com",
       "password": ""
     }
   ],
   "default_limits": {
     "per_minute": 10,
     "per_hour": 100,
-    "per_day": 500,
+    "per_day": 400,
     "max_batch": 5000,
     "window_start": "09:00",
     "window_end": "18:00",
@@ -58,6 +58,14 @@
   },
   "google_sign_in": {
     "client_id": ""
+  },
+  "email_tracking": {
+    "enabled": false,
+    "source": "parth-mailing",
+    "medium": "email",
+    "campaign": "",
+    "term": "",
+    "content": ""
   },
   "google_drive": {
     "enabled": false,

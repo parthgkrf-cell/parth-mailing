@@ -1,17 +1,20 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useAuth } from './context/AuthContext';
 import AuthPage from './pages/AuthPage';
 import DashboardPage from './pages/DashboardPage';
+import ImportExcelPage from './pages/ImportExcelPage';
 import ComposePage from './pages/ComposePage';
+import PreviewPage from './pages/PreviewPage';
 import DraftsPage from './pages/DraftsPage';
 import SchedulesPage from './pages/SchedulesPage';
 import AccountsPage from './pages/AccountsPage';
 import LogsPage from './pages/LogsPage';
+import ConfigPage from './pages/ConfigPage';
 import MasterPanelPage from './pages/MasterPanelPage';
 
 import { 
   Send, LayoutDashboard, Bookmark, Calendar, Mail, 
-  ListFilter, ShieldAlert, LogOut, ShieldCheck, Crown, Menu, X
+  ListFilter, LogOut, ShieldCheck, Crown, Menu, X, FileSpreadsheet, Eye, Sliders
 } from 'lucide-react';
 
 export default function App() {
@@ -19,6 +22,12 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [composerInitialData, setComposerInitialData] = useState(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+
+  useEffect(() => {
+    if (!isMaster && (activeTab === 'master' || activeTab === 'accounts')) {
+      setActiveTab('dashboard');
+    }
+  }, [isMaster, activeTab]);
 
   if (loading) {
     return (
@@ -42,14 +51,17 @@ export default function App() {
 
   const navItems = [
     { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard },
-    { id: 'compose', label: 'Compose & Schedule', icon: Send },
-    { id: 'drafts', label: 'Saved Drafts', icon: Bookmark },
+    { id: 'import', label: 'Import Excel', icon: FileSpreadsheet },
+    { id: 'compose', label: 'Composer', icon: Send },
+    { id: 'preview', label: 'Preview', icon: Eye },
     { id: 'schedules', label: 'Campaign Queue', icon: Calendar },
-    { id: 'accounts', label: 'Connected Accounts', icon: Mail },
+    { id: 'config', label: 'Configuration', icon: Sliders },
+    { id: 'drafts', label: 'Saved Drafts', icon: Bookmark },
     { id: 'logs', label: 'Delivery Logs', icon: ListFilter }
   ];
 
   if (isMaster) {
+    navItems.push({ id: 'accounts', label: 'Sending Accounts', icon: Mail });
     navItems.push({ id: 'master', label: 'Master Panel', icon: Crown, highlight: true });
   }
 
@@ -179,12 +191,24 @@ export default function App() {
           />
         )}
 
+        {activeTab === 'import' && (
+          <ImportExcelPage setActiveTab={setActiveTab} />
+        )}
+
         {activeTab === 'compose' && (
           <ComposePage 
             initialData={composerInitialData} 
             onDraftSaved={() => setActiveTab('drafts')}
             onScheduled={() => setActiveTab('schedules')}
           />
+        )}
+
+        {activeTab === 'preview' && (
+          <PreviewPage />
+        )}
+
+        {activeTab === 'config' && (
+          <ConfigPage />
         )}
 
         {activeTab === 'drafts' && (
@@ -195,7 +219,7 @@ export default function App() {
           <SchedulesPage />
         )}
 
-        {activeTab === 'accounts' && (
+        {activeTab === 'accounts' && isMaster && (
           <AccountsPage />
         )}
 

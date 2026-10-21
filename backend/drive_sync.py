@@ -15,8 +15,10 @@ except ImportError:  # The relay still runs; Drive backup stays off.
     serialization = None
     padding = None
 
-_TOKEN = {"value": "", "exp": 0}
+_TOKENS = {}
 _FOLDERS = {}
+DRIVE_SCOPE = "https://www.googleapis.com/auth/drive"
+SHEETS_SCOPE = "https://www.googleapis.com/auth/spreadsheets.readonly"
 
 
 def cryptography_ready():
@@ -44,17 +46,18 @@ def _request(url, token=None, data=None, headers=None, method=None):
         raise RuntimeError(f"Drive HTTP {exc.code}: {detail}") from None
 
 
-def _access_token(service_account):
+def _access_token(service_account, scope=DRIVE_SCOPE):
+    slot = _TOKENS.setdefault(scope, {"value": "", "exp": 0})
     now = time.time()
-    if _TOKEN["value"] and _TOKEN["exp"] - 60 > now:
-        return _TOKEN["value"]
+    if slot["value"] and slot["exp"] - 60 > now:
+        return slot["value"]
     if padding is None:
         raise RuntimeError("The cryptography package is not installed.")
     issued = int(now)
     header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode("utf-8"))
     claim = {
         "iss": service_account["client_email"],
-        "scope": "https://www.googleapis.com/auth/drive",
+        "scope": scope,
         "aud": "https://oauth2.googleapis.com/token",
         "iat": issued,
         "exp": issued + 3600,
@@ -74,9 +77,48 @@ def _access_token(service_account):
         headers={"Content-Type": "application/x-www-form-urlencoded"},
         method="POST",
     )
-    _TOKEN["value"] = data["access_token"]
-    _TOKEN["exp"] = issued + int(data.get("expires_in") or 3600)
-    return _TOKEN["value"]
+    slot["value"] = data["access_token"]
+    slot["exp"] = issued + int(data.get("expires_in") or 3600)
+    return slot["value"]
+
+
+def _read_url(url, token=None):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    req = urllib.request.Request(url, headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=40) as response:
+            return response.read()
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", "replace")[:400]
+        raise RuntimeError(f"Sheet HTTP {exc.code}: {detail}") from None
+
+
+def fetch_sheet_matrix(service_account, spreadsheet_id, gid=""):
+    """Return rows from a Google Sheet shared with the service account."""
+    token = _access_token(service_account, SHEETS_SCOPE)
+    meta = _request(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{urllib.parse.quote(spreadsheet_id)}?fields=sheets.properties",
+        token=token,
+        method="GET",
+    )
+    title = ""
+    for sheet in meta.get("sheets") or []:
+        props = sheet.get("properties") or {}
+        if not title:
+            title = str(props.get("title") or "")
+        if gid and str(props.get("sheetId")) == str(gid):
+            title = str(props.get("title") or title)
+            break
+    if not title:
+        title = "Sheet1"
+    safe_title = title.replace("'", "''")
+    quoted = urllib.parse.quote(f"'{safe_title}'!A:AZ", safe="")
+    data = _request(
+        f"https://sheets.googleapis.com/v4/spreadsheets/{urllib.parse.quote(spreadsheet_id)}/values/{quoted}",
+        token=token,
+        method="GET",
+    )
+    return data.get("values") or [], title
 
 
 def _escape(value):

@@ -7,7 +7,7 @@
   <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect rx='8' width='32' height='32' fill='%23121a2b'/%3E%3Cpath d='M6 11h20v12H6z' fill='none' stroke='%237dd3c7' stroke-width='2'/%3E%3Cpath d='M6 11l10 8 10-8' fill='none' stroke='%238b9dff' stroke-width='2'/%3E%3C/svg%3E">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@360;460;560;650&display=swap" rel="stylesheet">
+  <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@360;460;560;650&family=Barlow:wght@400;700&family=Bitter:wght@400;700&family=Cabin:wght@400;700&family=Cormorant+Garamond:wght@400;700&family=Crimson+Pro:wght@400;700&family=DM+Sans:wght@400;700&family=EB+Garamond:wght@400;700&family=Fira+Sans:wght@400;700&family=IBM+Plex+Sans:wght@400;700&family=Inter:wght@400;700&family=Josefin+Sans:wght@400;700&family=Karla:wght@400;700&family=Lato:wght@400;700&family=Libre+Baskerville:wght@400;700&family=Libre+Franklin:wght@400;700&family=Lora:wght@400;700&family=Manrope:wght@400;700&family=Merriweather:wght@400;700&family=Montserrat:wght@400;700&family=Mulish:wght@400;700&family=Nunito:wght@400;700&family=Open+Sans:wght@400;700&family=Oswald:wght@400;700&family=PT+Sans:wght@400;700&family=PT+Serif:wght@400;700&family=Playfair+Display:wght@400;700&family=Poppins:wght@400;700&family=Quicksand:wght@400;700&family=Raleway:wght@400;700&family=Roboto:wght@400;700&family=Roboto+Mono:wght@400;700&family=Roboto+Slab:wght@400;700&family=Source+Sans+3:wght@400;700&family=Ubuntu:wght@400;700&family=Work+Sans:wght@400;700&display=swap" rel="stylesheet">
   <script src="https://cdn.jsdelivr.net/npm/lucide@0.344.0/dist/umd/lucide.min.js"></script>
   <script src="https://accounts.google.com/gsi/client" async></script>
   <link rel="stylesheet" href="style.css">
@@ -25,30 +25,34 @@
         <span class="mark"><i data-lucide="send"></i></span>
         <div>
           <strong id="auth-brand">Parth Mailing</strong>
-          <span id="auth-tag">Liquid glass desk</span>
+          <span id="auth-tag">Set your name and password. The first login emails a 6-digit code from parth@gr-conferences.com.</span>
         </div>
       </div>
-      <div id="auth-clock" class="clock" aria-label="Current date and time">
-        <strong>--:--:--</strong>
-        <span>Loading date</span>
+      <div class="auth-tabs">
+        <button class="btn btn-ghost auth-tab is-on" type="button" data-action="auth-mode" data-mode="login">Sign in</button>
+        <button class="btn btn-ghost auth-tab" type="button" data-action="auth-mode" data-mode="register">Create account</button>
       </div>
-      <p id="relay-line" class="relay-line">Checking the relay…</p>
+      <div id="name-panel">
+        <label for="login-name">Your name</label>
+        <input id="login-name" class="input" autocomplete="name" placeholder="Parth Vekariya">
+      </div>
       <label for="login-email">Work email</label>
       <input id="login-email" class="input" type="email" autocomplete="username" placeholder="name@gr-conferences.com" required>
-      <p class="hint">Only @gr-conferences.com addresses can sign in. The code expires in 5 minutes.</p>
-      <div id="otp-panel" class="hidden">
-        <label for="login-code">Sign-in code</label>
-        <input id="login-code" class="input code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="000000">
-        <p id="otp-timer" class="hint">Code expires in 5:00</p>
-        <p id="dev-otp-note" class="note hidden"></p>
+      <div id="password-panel">
+        <label for="login-password" id="password-label">Password</label>
+        <input id="login-password" class="input" type="password" autocomplete="current-password" placeholder="At least 6 characters">
       </div>
-      <label for="api-base">Relay address</label>
-      <input id="api-base" class="input" type="url" spellcheck="false" autocomplete="off">
-      <button id="login-submit" class="btn btn-primary" type="submit">Email me a code</button>
+      <div id="otp-panel" class="hidden">
+        <label for="login-code">6-digit email code</label>
+        <input id="login-code" class="input code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+      </div>
+      <input id="api-base" class="hidden" type="url" spellcheck="false" autocomplete="off" tabindex="-1" aria-hidden="true">
+      <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
       <button id="otp-resend" class="btn btn-ghost hidden" type="button" data-action="resend-otp">Resend code</button>
-      <div class="auth-split"><span>or</span></div>
+      <button id="forgot-link" class="text-btn" type="button" data-action="auth-mode" data-mode="forgot">Forgot password?</button>
+      <p id="relay-line" class="hint"></p>
       <div id="google-signin"></div>
-      <p id="google-note" class="hint">Checking Google sign-in…</p>
+      <p id="google-note" class="hint"></p>
     </form>
   </section>
 
@@ -63,16 +67,24 @@
       </div>
       <nav class="nav" aria-label="Sections">
         <button class="nav-btn active" type="button" data-action="nav" data-view="home"><i data-lucide="layout-dashboard"></i><span>Desk</span></button>
-        <button class="nav-btn" type="button" data-action="nav" data-view="recipients"><i data-lucide="file-spreadsheet"></i><span>Recipients</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="recipients"><i data-lucide="file-spreadsheet"></i><span>Import</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="compose"><i data-lucide="pen-line"></i><span>Composer</span></button>
+        <button class="nav-btn" type="button" data-action="nav" data-view="preview"><i data-lucide="eye"></i><span>Preview</span></button>
         <button class="nav-btn" type="button" data-action="nav" data-view="campaigns"><i data-lucide="clock"></i><span>Campaigns</span></button>
         <button class="nav-btn" type="button" data-action="nav" data-view="history"><i data-lucide="history"></i><span>History</span></button>
-        <button class="nav-btn master-only" type="button" data-action="nav" data-view="master"><i data-lucide="shield"></i><span>Master</span></button>
+        <button class="nav-btn master-only hidden" type="button" data-action="nav" data-view="config"><i data-lucide="settings-2"></i><span>Configuration</span></button>
+        <button class="nav-btn master-only hidden" type="button" data-action="nav" data-view="master"><i data-lucide="shield"></i><span>Admin</span></button>
       </nav>
       <div class="side-foot">
-        <div id="relay-pill" class="pill">Relay</div>
-        <div class="side-actions">
-          <button id="theme-toggle" class="icon-btn" type="button" data-action="toggle-theme" title="Theme"><i data-lucide="moon"></i></button>
-          <button class="icon-btn" type="button" data-action="logout" title="Sign out"><i data-lucide="log-out"></i></button>
+        <button id="schedule-toggle" class="nav-btn schedule-side" type="button" data-action="schedule-toggle" title="Start at the S_Date and S_Time from the sheet">
+          <i data-lucide="calendar-clock"></i><span>Start Scheduling</span>
+        </button>
+        <div class="side-foot-row">
+          <div id="relay-pill" class="pill">Relay</div>
+          <div class="side-actions">
+            <button id="theme-toggle" class="icon-btn" type="button" data-action="toggle-theme" title="Theme"><i data-lucide="moon"></i></button>
+            <button class="icon-btn" type="button" data-action="logout" title="Sign out"><i data-lucide="log-out"></i></button>
+          </div>
         </div>
       </div>
     </aside>
@@ -97,7 +109,7 @@
 
   <section id="composer" class="composer glass hidden" aria-label="Mail composer">
     <header class="composer-bar" data-action="composer-bar">
-      <strong id="composer-title">New campaign</strong>
+      <strong id="composer-title">New Message</strong>
       <div class="composer-controls">
         <button type="button" data-action="composer-min" title="Minimize"><i data-lucide="minus"></i><span>Minimize</span></button>
         <button type="button" data-action="composer-dock" title="Dock"><i data-lucide="minimize-2"></i><span>Dock</span></button>
@@ -106,16 +118,25 @@
       </div>
     </header>
     <div class="composer-body">
-      <label class="line"><span>From</span><select id="from-select" class="input"></select></label>
-      <label class="line"><span>To</span><input id="to-input" class="input" placeholder="Extra addresses, comma separated"></label>
-      <div class="cc-row">
-        <button type="button" class="text-btn" data-action="toggle-cc">Cc / Bcc</button>
+      <div class="composer-fields">
+        <label class="line" title="SMTP Draft uses this mailbox. SMTP Send uses every mailbox assigned to you."><span>From</span><select id="from-select" class="input"></select></label>
+        <div class="to-line">
+          <label class="line"><span>To</span><input id="to-input" class="input" placeholder="Recipients"></label>
+          <button type="button" class="text-btn cc-toggle" data-action="toggle-cc">Cc</button>
+          <button type="button" class="text-btn cc-toggle" data-action="toggle-cc">Bcc</button>
+        </div>
+        <div id="cc-fields" class="hidden">
+          <label class="line"><span>Cc</span><input id="cc-input" class="input" placeholder="Cc"></label>
+          <label class="line"><span>Bcc</span><input id="bcc-input" class="input" placeholder="Bcc"></label>
+        </div>
+        <label class="line subject-line"><span class="sr-only">Subject</span><input id="subject-input" class="input" placeholder="Subject"></label>
       </div>
-      <div id="cc-fields" class="hidden">
-        <label class="line"><span>Cc</span><input id="cc-input" class="input"></label>
-        <label class="line"><span>Bcc</span><input id="bcc-input" class="input"></label>
+      <div class="template-bar">
+        <span>Templates</span>
+        <div id="template-list" class="template-list"></div>
       </div>
-      <label class="line"><span>Subject</span><input id="subject-input" class="input" placeholder="Subject"></label>
+      <div id="editor" class="editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write your message. Use {Affiliation} or {E} for Excel column E."></div>
+      <div class="composer-foot">
       <div id="toolbar" class="toolbar">
         <button type="button" data-action="format" data-cmd="bold" title="Bold"><i data-lucide="bold"></i></button>
         <button type="button" data-action="format" data-cmd="italic" title="Italic"><i data-lucide="italic"></i></button>
@@ -123,69 +144,124 @@
         <button type="button" data-action="insert-link" title="Link"><i data-lucide="link"></i></button>
         <button type="button" data-action="format" data-cmd="insertUnorderedList" title="Bullets"><i data-lucide="list"></i></button>
         <button type="button" data-action="format" data-cmd="insertOrderedList" title="Numbered"><i data-lucide="list-ordered"></i></button>
-        <select id="font-name" class="input slim" aria-label="Font">
-          <option value="Arial">Arial</option>
-          <option value="Arial Black">Arial Black</option>
-          <option value="Calibri">Calibri</option>
-          <option value="Cambria">Cambria</option>
-          <option value="Candara">Candara</option>
-          <option value="Century Gothic">Century Gothic</option>
-          <option value="Comic Sans MS">Comic Sans MS</option>
-          <option value="Consolas">Consolas</option>
-          <option value="Courier New">Courier New</option>
-          <option value="Franklin Gothic Medium">Franklin Gothic</option>
-          <option value="Garamond">Garamond</option>
-          <option value="Georgia">Georgia</option>
-          <option value="Helvetica">Helvetica</option>
-          <option value="Impact">Impact</option>
-          <option value="Lucida Console">Lucida Console</option>
-          <option value="Lucida Sans Unicode">Lucida Sans</option>
-          <option value="Palatino Linotype">Palatino</option>
-          <option value="Segoe UI">Segoe UI</option>
-          <option value="Tahoma">Tahoma</option>
-          <option value="Times New Roman">Times New Roman</option>
-          <option value="Trebuchet MS">Trebuchet MS</option>
-          <option value="Verdana">Verdana</option>
-        </select>
-        <select id="font-size" class="input slim" aria-label="Font size">
-          <option value="2">12</option>
-          <option value="3" selected>14</option>
-          <option value="4">16</option>
-          <option value="5">18</option>
-          <option value="6">24</option>
-          <option value="7">32</option>
-        </select>
-        <label class="color-tool" title="Text color">A<input id="font-color" type="color" value="#d7efe8" aria-label="Text color"></label>
-        <label class="color-tool" title="Highlight color">H<input id="font-highlight" type="color" value="#fff3a0" aria-label="Highlight color"></label>
+        <label class="tool-field">Font
+          <select id="font-name" class="input slim" aria-label="Font">
+            <optgroup label="Standard">
+              <option value="Arial" selected>Arial</option>
+              <option value="Arial Black">Arial Black</option>
+              <option value="Arial Narrow">Arial Narrow</option>
+              <option value="Bahnschrift">Bahnschrift</option>
+              <option value="Book Antiqua">Book Antiqua</option>
+              <option value="Bookman Old Style">Bookman Old Style</option>
+              <option value="Calibri">Calibri</option>
+              <option value="Cambria">Cambria</option>
+              <option value="Candara">Candara</option>
+              <option value="Century Gothic">Century Gothic</option>
+              <option value="Century Schoolbook">Century Schoolbook</option>
+              <option value="Comic Sans MS">Comic Sans MS</option>
+              <option value="Consolas">Consolas</option>
+              <option value="Constantia">Constantia</option>
+              <option value="Corbel">Corbel</option>
+              <option value="Courier New">Courier New</option>
+              <option value="Franklin Gothic Medium">Franklin Gothic</option>
+              <option value="Garamond">Garamond</option>
+              <option value="Georgia">Georgia</option>
+              <option value="Gill Sans">Gill Sans</option>
+              <option value="Helvetica">Helvetica</option>
+              <option value="Impact">Impact</option>
+              <option value="Lucida Console">Lucida Console</option>
+              <option value="Lucida Sans Unicode">Lucida Sans</option>
+              <option value="Palatino Linotype">Palatino</option>
+              <option value="Perpetua">Perpetua</option>
+              <option value="Rockwell">Rockwell</option>
+              <option value="Segoe UI">Segoe UI</option>
+              <option value="Segoe Print">Segoe Print</option>
+              <option value="Tahoma">Tahoma</option>
+              <option value="Times New Roman">Times New Roman</option>
+              <option value="Trebuchet MS">Trebuchet MS</option>
+              <option value="Verdana">Verdana</option>
+            </optgroup>
+            <optgroup label="More fonts">
+              <option value="Barlow">Barlow</option>
+              <option value="Bitter">Bitter</option>
+              <option value="Cabin">Cabin</option>
+              <option value="Cormorant Garamond">Cormorant Garamond</option>
+              <option value="Crimson Pro">Crimson Pro</option>
+              <option value="DM Sans">DM Sans</option>
+              <option value="EB Garamond">EB Garamond</option>
+              <option value="Fira Sans">Fira Sans</option>
+              <option value="IBM Plex Sans">IBM Plex Sans</option>
+              <option value="Inter">Inter</option>
+              <option value="Josefin Sans">Josefin Sans</option>
+              <option value="Karla">Karla</option>
+              <option value="Lato">Lato</option>
+              <option value="Libre Baskerville">Libre Baskerville</option>
+              <option value="Libre Franklin">Libre Franklin</option>
+              <option value="Lora">Lora</option>
+              <option value="Manrope">Manrope</option>
+              <option value="Merriweather">Merriweather</option>
+              <option value="Montserrat">Montserrat</option>
+              <option value="Mulish">Mulish</option>
+              <option value="Nunito">Nunito</option>
+              <option value="Open Sans">Open Sans</option>
+              <option value="Oswald">Oswald</option>
+              <option value="PT Sans">PT Sans</option>
+              <option value="PT Serif">PT Serif</option>
+              <option value="Playfair Display">Playfair Display</option>
+              <option value="Poppins">Poppins</option>
+              <option value="Quicksand">Quicksand</option>
+              <option value="Raleway">Raleway</option>
+              <option value="Roboto">Roboto</option>
+              <option value="Roboto Mono">Roboto Mono</option>
+              <option value="Roboto Slab">Roboto Slab</option>
+              <option value="Source Sans 3">Source Sans 3</option>
+              <option value="Ubuntu">Ubuntu</option>
+              <option value="Work Sans">Work Sans</option>
+            </optgroup>
+          </select>
+        </label>
+        <label class="tool-field">Size
+          <select id="font-size" class="input slim" aria-label="Font size">
+            <option>8</option><option>9</option><option>10</option><option>11</option><option>12</option>
+            <option>13</option><option selected>14</option><option>15</option><option>16</option><option>18</option>
+            <option>20</option><option>22</option><option>24</option><option>26</option><option>28</option>
+            <option>30</option><option>32</option><option>36</option><option>40</option><option>44</option>
+            <option>48</option><option>56</option><option>64</option><option>72</option><option>80</option><option>96</option>
+          </select>
+        </label>
+        <label class="tool-field">Custom size
+          <input id="font-size-custom" class="input slim" type="number" min="8" max="120" value="14" aria-label="Custom font size">
+        </label>
+        <label class="color-tool" title="Text color">Text<input id="font-color" type="color" value="#d7efe8" aria-label="Text color"></label>
+        <label class="color-tool" title="Highlight color">Highlight<input id="font-highlight" type="color" value="#fff3a0" aria-label="Highlight color"></label>
         <button type="button" data-action="pick-image" title="Inline image"><i data-lucide="image"></i></button>
         <input id="image-input" type="file" accept="image/*" class="hidden">
       </div>
       <div id="var-bar" class="var-bar"></div>
-      <div id="editor" class="editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write the message. Variable buttons personalize each row."></div>
-      <p id="merge-preview" class="preview-line">Add recipients to preview personalization.</p>
-      <div class="pace-grid">
-        <label>Delay min (s)<input id="delay-min" class="input" type="number" min="0" max="300" step="0.5" value="4"></label>
-        <label>Delay max (s)<input id="delay-max" class="input" type="number" min="0" max="300" step="0.5" value="12"></label>
-        <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="20"></label>
-        <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="2"></label>
-      </div>
-      <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
-      <div id="schedule-fields" class="schedule-grid hidden">
-        <input id="schedule-date" class="input" type="date">
-        <input id="schedule-time" class="input" type="time">
-        <select id="schedule-zone" class="input" aria-label="Timezone"></select>
-      </div>
-      <div class="attach-row">
-        <button type="button" class="btn btn-ghost" data-action="pick-attachment"><i data-lucide="paperclip"></i> Attach</button>
+      <details class="composer-options">
+        <summary>Sending pace and schedule</summary>
+        <div class="pace-grid">
+          <label>Delay min (s)<input id="delay-min" class="input" type="number" min="0" max="300" step="0.5" value="4"></label>
+          <label>Delay max (s)<input id="delay-max" class="input" type="number" min="0" max="300" step="0.5" value="12"></label>
+          <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="20"></label>
+          <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="2"></label>
+        </div>
+        <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
+        <div id="schedule-fields" class="schedule-grid hidden">
+          <input id="schedule-date" class="input" type="date">
+          <input id="schedule-time" class="input" type="time">
+          <select id="schedule-zone" class="input" aria-label="Timezone"></select>
+        </div>
+      </details>
+      <div class="composer-actions">
+        <button type="button" class="btn btn-primary" id="send-button" data-action="smtp-send">SMTP Send</button>
+        <button type="button" class="btn btn-warn" id="draft-button" data-action="smtp-draft">SMTP Draft</button>
+        <button type="button" class="btn btn-ghost" data-action="save-draft">Save</button>
+        <button type="button" class="btn btn-ghost icon-attach" data-action="pick-attachment" title="Attach files"><i data-lucide="paperclip"></i></button>
         <input id="attach-input" type="file" multiple class="hidden">
         <div id="attach-list" class="attach-list"></div>
-      </div>
-      <div class="composer-actions">
-        <button type="button" class="btn btn-ghost" data-action="composer-min">Minimize</button>
-        <button type="button" class="btn btn-ghost" data-action="composer-close">Close</button>
         <span class="grow"></span>
-        <button type="button" class="btn btn-ghost" data-action="save-draft">Save draft</button>
-        <button type="button" class="btn btn-primary" id="send-button" data-action="send-campaign">Send campaign</button>
+      </div>
       </div>
     </div>
   </section>

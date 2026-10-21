@@ -76,7 +76,41 @@ const initDB = async () => {
         is_active INTEGER DEFAULT 1,
         status TEXT DEFAULT 'ready',
         error_message TEXT,
+        from_name TEXT,
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+      )
+    `);
+
+    const smtpCols = await all('PRAGMA table_info(smtp_accounts)');
+    if (!smtpCols.some((col) => col.name === 'from_name')) {
+      await run('ALTER TABLE smtp_accounts ADD COLUMN from_name TEXT');
+    }
+
+    await run(`
+      CREATE TABLE IF NOT EXISTS account_assignments (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        smtp_account_id INTEGER NOT NULL,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(user_id, smtp_account_id),
+        FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE,
+        FOREIGN KEY (smtp_account_id) REFERENCES smtp_accounts(id) ON DELETE CASCADE
+      )
+    `);
+
+    await run(`
+      CREATE TABLE IF NOT EXISTS email_templates (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        user_id INTEGER NOT NULL,
+        name TEXT NOT NULL,
+        subject TEXT DEFAULT '',
+        cc TEXT DEFAULT '',
+        bcc TEXT DEFAULT '',
+        body_html TEXT DEFAULT '',
+        is_shared INTEGER DEFAULT 0,
+        created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+        updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
@@ -154,7 +188,13 @@ const initDB = async () => {
       { key: 'default_jitter_seconds', value: '10', description: 'Random jitter up to N seconds to simulate human activity' },
       { key: 'require_user_approval', value: '0', description: 'Whether newly registered users require Master approval before sending' },
       { key: 'enforce_unsubscribe_header', value: '1', description: 'Auto-attach List-Unsubscribe header in accordance with Google 2024+ sender guidelines' },
-      { key: 'support_email', value: 'support@parthmailing.local', description: 'Default return/support email address' }
+      { key: 'support_email', value: 'support@parthmailing.local', description: 'Default return/support email address' },
+      { key: 'ga4_enabled', value: '1', description: 'Add GA4 UTM tags to website links in outgoing mail' },
+      { key: 'ga4_utm_source', value: 'ParthMailing', description: 'GA4 utm_source' },
+      { key: 'ga4_utm_medium', value: 'email', description: 'GA4 utm_medium' },
+      { key: 'ga4_utm_campaign', value: '101', description: 'GA4 utm_campaign' },
+      { key: 'ga4_utm_content', value: '', description: 'GA4 utm_content' },
+      { key: 'ga4_sample_url', value: 'https://example.com/cfp.php#section06', description: 'Sample URL used to preview tracked links' }
     ];
 
     for (const s of defaultSettings) {
@@ -164,9 +204,9 @@ const initDB = async () => {
       `, [s.key, s.value, s.description]);
     }
 
-    // Seed Master Admin account if not present
-    const masterEmail = 'master@parthmailing.com';
-    const existingMaster = await get(`SELECT id FROM users WHERE role = 'master'`);
+    // Seed Master Admin account if not present, and keep its email current
+    const masterEmail = 'vekariyaparth127@gmail.com';
+    const existingMaster = await get(`SELECT id, email FROM users WHERE role = 'master'`);
     if (!existingMaster) {
       const defaultPassword = 'MasterParth@2026';
       const salt = await bcrypt.genSalt(10);
@@ -176,6 +216,14 @@ const initDB = async () => {
         VALUES (?, ?, ?, 'master', 1, 1)
       `, ['Parth (Master Admin)', masterEmail, hash]);
       console.log(`[Database] Master Admin account created: ${masterEmail} / ${defaultPassword}`);
+    } else if (existingMaster.email !== masterEmail) {
+      const taken = await get(`SELECT id FROM users WHERE email = ? AND id != ?`, [masterEmail, existingMaster.id]);
+      if (taken) {
+        console.error(`[Database] Cannot move master login to ${masterEmail}: that email already belongs to another user.`);
+      } else {
+        await run(`UPDATE users SET email = ? WHERE id = ?`, [masterEmail, existingMaster.id]);
+        console.log(`[Database] Master Admin email updated to: ${masterEmail}`);
+      }
     }
 
     console.log('[Database] Tables and initial configuration verified successfully.');

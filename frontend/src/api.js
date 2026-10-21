@@ -51,6 +51,15 @@ export const api = {
   resumeSchedule: (id) => request(`/emails/schedules/${id}/resume`, { method: 'PUT' }),
   deleteSchedule: (id) => request(`/emails/schedules/${id}`, { method: 'DELETE' }),
   getLogs: (limit = 100) => request(`/emails/logs?limit=${limit}`),
+  getTemplates: () => request('/emails/templates'),
+  saveTemplate: (payload) => request('/emails/templates', { method: 'POST', body: JSON.stringify(payload) }),
+  updateTemplate: (id, payload) => request(`/emails/templates/${id}`, { method: 'PUT', body: JSON.stringify(payload) }),
+  deleteTemplate: (id) => request(`/emails/templates/${id}`, { method: 'DELETE' }),
+  getGa4: () => request('/emails/ga4'),
+  saveGa4: (tracking) => request('/emails/ga4', { method: 'POST', body: JSON.stringify({ tracking }) }),
+  previewMerge: (payload) => request('/emails/preview-merge', { method: 'POST', body: JSON.stringify(payload) }),
+  getUserAccounts: (id) => request(`/master/users/${id}/accounts`),
+  assignUserAccounts: (id, account_ids) => request(`/master/users/${id}/accounts`, { method: 'PUT', body: JSON.stringify({ account_ids }) }),
 
   // Master Admin
   getMasterStats: () => request('/master/stats'),

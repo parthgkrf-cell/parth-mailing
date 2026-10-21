@@ -76,7 +76,7 @@ async function verifyAccountConnection(account) {
 /**
  * Sends a single email with Google compliance safeguards and quota increments
  */
-async function sendSingleEmail({ account, recipient, subject, bodyHtml, bodyText, scheduledId = null, userId }) {
+async function sendSingleEmail({ account, recipient, subject, bodyHtml, bodyText, scheduledId = null, userId, fromName, cc, bcc }) {
   // 1. Quota check & reset
   const wasReset = checkAndResetDailyQuota(account);
   if (wasReset) {
@@ -100,12 +100,15 @@ async function sendSingleEmail({ account, recipient, subject, bodyHtml, bodyText
   const transporter = getTransporter(account);
   const supportEmail = account.email;
 
+  const displayName = fromName || account.from_name || account.label || 'Parth Mailing';
   const mailOptions = {
-    from: `"${account.label || 'Parth Mailing'}" <${account.email}>`,
+    from: `"${displayName}" <${account.email}>`,
     to: recipient,
     subject: subject,
     html: bodyHtml,
     text: bodyText || bodyHtml.replace(/<[^>]*>?/gm, ''), // fallback plain text
+    cc: cc || undefined,
+    bcc: bcc || undefined,
     headers: {
       'List-Unsubscribe': `<mailto:${supportEmail}?subject=unsubscribe>`,
       'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',

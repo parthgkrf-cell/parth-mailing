@@ -17,6 +17,9 @@ const HEADER_SETS = {
   last: new Set(["lastname", "last name", "last", "surname", "family name", "familyname"]),
   company: new Set(["company", "organization", "organisation", "org", "affiliation", "institution"]),
   custom: new Set(["custom1", "custom", "note", "tag", "segment"]),
+  template: new Set(["template", "html", "body", "message", "email body", "emailbody"]),
+  sender: new Set(["sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address"]),
+  sender_name: new Set(["sender name", "from name", "displayname", "display name", "sendername"]),
 };
 
 function normHeader(value) {
@@ -37,7 +40,7 @@ function cell(row, index) {
 }
 
 function buildMapper(headers) {
-  const mapper = { email: -1, first: -1, last: -1, company: -1, custom: -1, fields: [] };
+  const mapper = { email: -1, first: -1, last: -1, company: -1, custom: -1, template: -1, sender: -1, sender_name: -1, fields: [] };
   headers.forEach((header, index) => {
     const name = normHeader(header);
     if (!name) return;
@@ -46,6 +49,9 @@ function buildMapper(headers) {
     else if (mapper.last < 0 && HEADER_SETS.last.has(name)) mapper.last = index;
     else if (mapper.company < 0 && HEADER_SETS.company.has(name)) mapper.company = index;
     else if (mapper.custom < 0 && HEADER_SETS.custom.has(name)) mapper.custom = index;
+    else if (mapper.template < 0 && HEADER_SETS.template.has(name)) mapper.template = index;
+    else if (mapper.sender_name < 0 && HEADER_SETS.sender_name.has(name)) mapper.sender_name = index;
+    else if (mapper.sender < 0 && HEADER_SETS.sender.has(name)) mapper.sender = index;
     else mapper.fields.push(index);
   });
   return mapper;
@@ -69,7 +75,7 @@ function detectEmailColumn(sampleRows, width) {
 
 function createSink() {
   const seen = new Set();
-  const columns = new Set(["FirstName", "LastName", "Company", "Custom1", "Email"]);
+  const columns = new Set(["FirstName", "LastName", "Company", "Custom1", "Email", "Template", "Sender", "Sender Name"]);
   const stats = { scanned: 0, valid: 0, invalid: 0, duplicates: 0 };
   let batch = [];
   function flush() {
@@ -99,19 +105,44 @@ function createSink() {
   return { push, flush, stats, columns };
 }
 
+function columnLetter(index) {
+  let n = index + 1;
+  let letters = "";
+  while (n > 0) {
+    const rem = (n - 1) % 26;
+    letters = String.fromCharCode(65 + rem) + letters;
+    n = Math.floor((n - 1) / 26);
+  }
+  return letters;
+}
+
 function rowFrom(values, mapper, headers, extraFields) {
   const fields = Object.assign({}, extraFields || {});
-  mapper.fields.forEach((index) => {
-    const key = String(headers[index] || "").trim();
-    if (!key) return;
-    fields[key] = cell(values, index);
-  });
+  const width = Math.max(headers.length, values.length);
+  for (let index = 0; index < width; index += 1) {
+    const value = cell(values, index);
+    const name = String(headers[index] || "").trim();
+    if (!name && !value) continue;
+    if (name) fields[name] = value;
+    fields[columnLetter(index)] = value;
+  }
+  const firstName = cell(values, mapper.first);
+  const template = cell(values, mapper.template);
+  const sender = cell(values, mapper.sender);
+  const senderName = cell(values, mapper.sender_name);
+  if (firstName) fields.Name = firstName;
+  if (template) fields.Template = template;
+  if (sender) fields.Sender = sender;
+  if (senderName) fields["Sender Name"] = senderName;
   return {
     email: cell(values, mapper.email),
-    first_name: cell(values, mapper.first),
+    first_name: firstName,
     last_name: cell(values, mapper.last),
     company: cell(values, mapper.company),
     custom1: cell(values, mapper.custom),
+    template,
+    sender,
+    sender_name: senderName,
     fields,
   };
 }

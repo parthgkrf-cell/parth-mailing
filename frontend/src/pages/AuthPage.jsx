@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
-import { ShieldCheck, Mail, Lock, User, Sparkles, CheckCircle2, AlertCircle } from 'lucide-react';
+import { Mail, Lock, User, Sparkles, CheckCircle2, AlertCircle } from 'lucide-react';
 
 export default function AuthPage() {
   const { login, register } = useAuth();
@@ -32,12 +32,6 @@ export default function AuthPage() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleFillMaster = () => {
-    setEmail('master@parthmailing.com');
-    setPassword('MasterParth@2026');
-    setIsRegister(false);
   };
 
   return (
@@ -160,26 +154,6 @@ export default function AuthPage() {
               )}
             </button>
           </form>
-
-          {/* Master Admin Quick Login Hint */}
-          <div className="mt-6 pt-5 border-t border-slate-800/80">
-            <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-              <span className="flex items-center gap-1.5 font-medium text-slate-300">
-                <ShieldCheck className="w-4 h-4 text-emerald-400" />
-                Master Admin Portal:
-              </span>
-              <button
-                type="button"
-                onClick={handleFillMaster}
-                className="text-indigo-400 hover:text-indigo-300 font-semibold underline underline-offset-2 transition-colors"
-              >
-                Auto-fill Master Credentials
-              </button>
-            </div>
-            <p className="text-[11px] text-slate-500 leading-relaxed">
-              Default master login is seeded as <code className="text-slate-300 bg-slate-950 px-1 py-0.5 rounded">master@parthmailing.com</code> with password <code className="text-slate-300 bg-slate-950 px-1 py-0.5 rounded">MasterParth@2026</code>.
-            </p>
-          </div>
         </div>
 
         {/* Feature Highlights */}
