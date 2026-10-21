@@ -98,9 +98,10 @@ html[data-theme="light"] .composer-foot { background: rgba(255, 255, 255, 0.94);
 }
 
 .auth-screen {
-  min-height: 100vh; display: grid; place-items: center; padding: 24px; position: relative; z-index: 1;
+  height: 100vh; min-height: 100vh; display: flex; justify-content: center; align-items: flex-start;
+  padding: 24px; position: relative; z-index: 1; overflow: auto;
 }
-.auth-card { width: min(440px, 100%); padding: 28px; display: flex; flex-direction: column; gap: 10px; }
+.auth-card { width: min(440px, 100%); margin: auto; padding: 28px; display: flex; flex-direction: column; gap: 10px; }
 .auth-tabs { display: flex; gap: 8px; }
 .auth-tab.is-on { border-color: var(--accent); background: rgba(125, 211, 199, 0.16); }
 .preview-frame { width: 100%; min-height: 420px; border: 1px solid var(--stroke); border-radius: 16px; background: #fff; }
@@ -176,6 +177,7 @@ select option:checked, select option:hover, select option:focus {
   box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 25%, transparent);
 }
 .code-input { letter-spacing: 0.4em; font-size: 22px; text-align: center; }
+.code-input::placeholder { letter-spacing: 0; font-size: 16px; }
 .slim { width: auto; padding: 6px 8px; border-radius: 12px; }
 
 .btn, .icon-btn, .text-btn, .nav-btn {

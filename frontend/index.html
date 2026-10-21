@@ -42,13 +42,14 @@
         <label for="login-password" id="password-label">Password</label>
         <input id="login-password" class="input" type="password" autocomplete="current-password" placeholder="At least 6 characters">
       </div>
-      <div id="otp-panel" class="hidden">
-        <label for="login-code">6-digit email code</label>
-        <input id="login-code" class="input code-input" inputmode="numeric" maxlength="6" autocomplete="one-time-code" placeholder="6-digit code">
+      <div id="otp-panel">
+        <label for="login-code">Paste the 6-digit code</label>
+        <input id="login-code" class="input code-input" inputmode="numeric" maxlength="32" autocomplete="one-time-code" placeholder="6-digit code">
+        <p id="otp-timer" class="hint"></p>
       </div>
       <input id="api-base" class="hidden" type="url" spellcheck="false" autocomplete="off" tabindex="-1" aria-hidden="true">
       <button id="login-submit" class="btn btn-primary" type="submit">Sign in</button>
-      <button id="otp-resend" class="btn btn-ghost hidden" type="button" data-action="resend-otp">Resend code</button>
+      <button id="otp-resend" class="btn btn-ghost" type="button" data-action="resend-otp">Email me a code</button>
       <button id="forgot-link" class="text-btn" type="button" data-action="auth-mode" data-mode="forgot">Forgot password?</button>
       <p id="relay-line" class="hint"></p>
       <div id="google-signin"></div>

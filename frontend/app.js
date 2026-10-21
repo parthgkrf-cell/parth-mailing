@@ -1770,14 +1770,20 @@ function maskAddress(value) {
   ));
 }
 
+function codeDigits() {
+  return String((document.getElementById("login-code") || {}).value || "").replace(/\D/g, "").slice(0, 6);
+}
+
 function paintLoginButton() {
   const button = document.getElementById("login-submit");
   if (!button) return;
-  const otpOn = !document.getElementById("otp-panel").classList.contains("hidden");
-  if (otpOn) button.textContent = state.otpPurpose === "reset" ? "Reset password" : "Confirm code";
+  const ready = codeDigits().length === 6 || state.otpDeadline;
+  if (ready) button.textContent = state.otpPurpose === "reset" ? "Reset password" : "Confirm code";
   else if (state.authMode === "register") button.textContent = "Create account";
   else if (state.authMode === "forgot") button.textContent = "Email reset code";
   else button.textContent = "Sign in";
+  const resend = document.getElementById("otp-resend");
+  if (resend) resend.textContent = state.otpDeadline ? "Resend code" : "Email me a code";
 }
 
 function setAuthMode(mode) {
@@ -1791,7 +1797,7 @@ function setAuthMode(mode) {
   const forgot = document.getElementById("forgot-link");
   const showName = state.authMode === "register" || state.authMode === "login";
   if (namePanel) namePanel.classList.toggle("hidden", state.authMode === "forgot");
-  if (passwordPanel) passwordPanel.classList.toggle("hidden", state.authMode === "forgot" && document.getElementById("otp-panel").classList.contains("hidden"));
+  if (passwordPanel) passwordPanel.classList.remove("hidden");
   if (passwordLabel) {
     passwordLabel.textContent = state.authMode === "forgot" || state.otpPurpose === "reset" ? "New password" : "Password";
   }
@@ -1799,27 +1805,26 @@ function setAuthMode(mode) {
   const tag = document.getElementById("auth-tag");
   if (tag) {
     tag.textContent = state.authMode === "register"
-      ? "Enter your name, email, and password. We email a 6-digit code from parth@gr-conferences.com."
+      ? "Enter your name, email, and password. Paste the 6-digit code from parth@gr-conferences.com."
       : state.authMode === "forgot"
-        ? "We email a 6-digit code from parth@gr-conferences.com, then you choose a new password."
-        : "Sign in with email and password. The first login emails a 6-digit code from parth@gr-conferences.com.";
+        ? "Paste the 6-digit code from parth@gr-conferences.com, then choose a new password."
+        : "Sign in with email and password. Paste the 6-digit code from parth@gr-conferences.com when it arrives.";
   }
   paintLoginButton();
 }
 
 function showOtp(on, purpose) {
   if (purpose) state.otpPurpose = purpose;
-  document.getElementById("otp-panel").classList.toggle("hidden", !on);
-  const resend = document.getElementById("otp-resend");
-  if (resend) resend.classList.toggle("hidden", !on);
+  const panel = document.getElementById("otp-panel");
+  if (panel) panel.classList.remove("hidden");
   const code = document.getElementById("login-code");
   if (code && !on) code.value = "";
   const passwordPanel = document.getElementById("password-panel");
-  if (passwordPanel) passwordPanel.classList.toggle("hidden", state.authMode === "forgot" && !on);
+  if (passwordPanel) passwordPanel.classList.remove("hidden");
   setAuthMode(state.authMode);
   const line = document.getElementById("relay-line");
-  if (line && on) line.textContent = "Enter the 6-digit code from the email sent by parth@gr-conferences.com.";
-  if (line && !on && line.textContent.includes("parth@gr-conferences.com")) line.textContent = "";
+  if (line && on) line.textContent = "Paste the 6-digit code from the email sent by parth@gr-conferences.com.";
+  if (code && on) code.focus();
 }
 
 async function finishAuth(data, message) {
@@ -1843,7 +1848,7 @@ async function requestOtp() {
 
 async function verifyOtp() {
   const email = normalizeEmail(document.getElementById("login-email").value);
-  const code = document.getElementById("login-code").value.trim();
+  const code = codeDigits();
   const password = document.getElementById("login-password").value;
   const body = { email, code };
   if (state.otpPurpose === "reset") body.password = password;
@@ -1855,8 +1860,9 @@ async function submitAuth() {
   const email = normalizeEmail(document.getElementById("login-email").value);
   const password = document.getElementById("login-password").value;
   const name = document.getElementById("login-name").value.trim();
-  const otpOn = !document.getElementById("otp-panel").classList.contains("hidden");
-  if (otpOn) {
+  const code = codeDigits();
+  if (code.length && code.length < 6) throw new Error("Paste the full 6-digit code from the email.");
+  if (code.length === 6) {
     await verifyOtp();
     return;
   }
@@ -2515,8 +2521,16 @@ document.getElementById("login-email").addEventListener("input", () => {
   if (state.otpEmail && email !== state.otpEmail) {
     state.otpEmail = "";
     state.otpDeadline = 0;
-    showOtp(false);
+    const code = document.getElementById("login-code");
+    if (code) code.value = "";
   }
+  paintLoginButton();
+});
+
+document.getElementById("login-code").addEventListener("input", () => {
+  const field = document.getElementById("login-code");
+  const digits = String(field.value || "").replace(/\D/g, "").slice(0, 6);
+  if (field.value !== digits) field.value = digits;
   paintLoginButton();
 });
 
