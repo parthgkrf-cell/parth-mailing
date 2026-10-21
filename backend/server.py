@@ -3153,25 +3153,23 @@ def notify_admin_mailbox_request(user_email, display_name, mailbox):
         log(f"Mailbox request from {user_email} for {mailbox} (admin email not sent: mailbox not ready)")
         return False
     who = display_name or user_email
-    subject = f"Approve mailbox access: {mailbox}"
-    body = f"""<!DOCTYPE html><html><body style="margin:0;background:#0e1524;padding:28px;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:480px;margin:0 auto;padding:28px;border-radius:24px;background:#172033;border:1px solid rgba(255,255,255,0.15);color:#f4f7fb;">
-<p style="letter-spacing:.16em;text-transform:uppercase;font-size:12px;color:#9fb0c9;margin:0 0 8px;">Parth Mailing</p>
-<h1 style="font-size:22px;font-weight:600;margin:0 0 8px;">Access approval queue</h1>
-<p style="color:#c5d0e0;line-height:1.5;">{html.escape(who)} ({html.escape(user_email)}) asked to send from <strong>{html.escape(mailbox)}</strong>.</p>
-<p style="color:#c5d0e0;line-height:1.5;">Open the desk, then Admin, then Access approval queue. Approve or deny it there.</p>
-</div></body></html>"""
+    subject = f"Parth Mailing mailbox request from {who}"
+    plain = (
+        f"{who} ({user_email}) asked to send from {mailbox}.\n\n"
+        "Open the desk, choose Admin, then Access approval queue, and approve or deny the request."
+    )
+    body = f"""<!DOCTYPE html><html><body style="margin:0;padding:24px;font-family:Segoe UI,Arial,sans-serif;color:#1a1a1a;">
+<p style="margin:0 0 12px;">Parth Mailing</p>
+<p style="margin:0 0 12px;">{html.escape(who)} ({html.escape(user_email)}) asked to send from <strong>{html.escape(mailbox)}</strong>.</p>
+<p style="margin:0;">Open the desk, choose Admin, then Access approval queue, and approve or deny the request.</p>
+</body></html>"""
     message = MIMEMultipart("alternative")
-    message["From"] = build_aligned_from("Parth Mailing", from_address)
+    message["From"] = from_address
     message["To"] = ADMIN_EMAIL
     message["Subject"] = subject
     message["Date"] = email.utils.formatdate(localtime=True)
     message["Message-ID"] = email.utils.make_msgid(domain="gr-conferences.com")
-    message.attach(MIMEText(
-        f"{who} ({user_email}) asked to send from {mailbox}. Open Admin, then Access approval queue.",
-        "plain",
-        "utf-8",
-    ))
+    message.attach(MIMEText(plain, "plain", "utf-8"))
     message.attach(MIMEText(body, "html", "utf-8"))
     try:
         deliver_fresh_smtp(sender, message, ADMIN_EMAIL)
