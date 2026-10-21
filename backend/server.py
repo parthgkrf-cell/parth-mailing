@@ -2049,6 +2049,10 @@ def deliver(campaign, recipient, sender, limits_ignored=False):
     envelope = [recipient["email"], *cc_list, *bcc_list]
     try:
         code, _detail = send_with_pool(sender, message, envelope)
+        try:
+            copy_to_sent(sender, message)
+        except Exception as exc:
+            log(f"Sent folder copy failed for {sender.get('user') or ''}: {str(exc)[:180]}")
         return {"status": "SENT", "code": code, "error": "", "simulated": False}
     except Exception as exc:
         status, code, detail = classify_smtp_error(exc)
@@ -2171,6 +2175,95 @@ def open_imap(sender):
                 pass
         raise
     return mail
+
+
+def pick_sent_folder(mail, sender=None):
+    host = imap_host_for(sender or {})
+    fallback = "[Gmail]/Sent Mail" if "gmail.com" in host or "google" in host else "Sent"
+    try:
+        typ, folders = mail.list()
+    except Exception:
+        return fallback
+    if str(typ).upper() != "OK":
+        return fallback
+    ranked = []
+    for item in folders or []:
+        if not item:
+            continue
+        flags, name = parse_list_entry(item)
+        if not name or name.upper() in ("INBOX", "/"):
+            continue
+        lowered = name.lower()
+        if "draft" in lowered or "trash" in lowered or "spam" in lowered or "junk" in lowered:
+            continue
+        if "\\sent" in flags:
+            score = 100
+        elif "sent mail" in lowered or lowered.endswith("/sent"):
+            score = 80
+        elif "sent" in lowered:
+            score = 40
+        else:
+            continue
+        ranked.append((score, name))
+    if not ranked:
+        return fallback
+    ranked.sort(key=lambda pair: pair[0], reverse=True)
+    return ranked[0][1]
+
+
+_IMAP_POOL = {}
+_IMAP_GUARD = threading.RLock()
+
+
+def pooled_imap(sender):
+    key = normalize_email(sender.get("user") or sender.get("email"))
+    with _IMAP_GUARD:
+        mail = _IMAP_POOL.get(key)
+        if mail is not None:
+            try:
+                mail.noop()
+                return mail
+            except Exception:
+                _IMAP_POOL.pop(key, None)
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
+        mail = open_imap(sender)
+        _IMAP_POOL[key] = mail
+        return mail
+
+
+def copy_to_sent(sender, message):
+    """Put the message in the sender Sent folder when the provider did not."""
+    mail = pooled_imap(sender)
+    folder = pick_sent_folder(mail, sender)
+    quoted = quote_mailbox(folder)
+    msgid = str(message.get("Message-ID") or "").strip()
+    with _IMAP_GUARD:
+        if msgid:
+            try:
+                mail.select(quoted, readonly=True)
+                typ, data = mail.search(None, "HEADER", "Message-ID", msgid)
+                if str(typ).upper() == "OK" and data and str(data[0]).strip() not in ("", "b''"):
+                    return
+            except Exception:
+                pass
+        try:
+            mail.close()
+        except Exception:
+            pass
+        typ, data = mail.append(
+            quoted,
+            "\\Seen",
+            imaplib.Time2Internaldate(time.time()),
+            message.as_bytes(),
+        )
+    if str(typ).upper() != "OK":
+        detail = data[-1] if data else ""
+        if isinstance(detail, (bytes, bytearray)):
+            detail = detail.decode("utf-8", "replace")
+        raise RuntimeError(str(detail or "The Sent folder did not store the message."))
 
 
 def save_imap_draft(sender, message):
@@ -2479,12 +2572,16 @@ def row_ready_unix(fields, timezone, fallback):
         zone = datetime.timezone.utc
     day = parse_sheet_date(date_raw)
     clock = parse_sheet_time(time_raw) or parse_sheet_time(date_raw)
-    if day and not clock and fallback:
-        try:
-            moment = datetime.datetime.fromtimestamp(float(fallback), zone)
-            clock = (moment.hour, moment.minute)
-        except (TypeError, ValueError, OSError):
-            clock = None
+    if day and not clock:
+        today = datetime.datetime.now(zone).date()
+        if day <= today:
+            return time.time()
+        if fallback:
+            try:
+                moment = datetime.datetime.fromtimestamp(float(fallback), zone)
+                clock = (moment.hour, moment.minute)
+            except (TypeError, ValueError, OSError):
+                clock = None
     if not day or not clock:
         return "invalid"
     local = datetime.datetime(day.year, day.month, day.day, clock[0], clock[1], tzinfo=zone)

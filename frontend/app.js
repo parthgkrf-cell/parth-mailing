@@ -1530,6 +1530,11 @@ function sheetTimes(rows, zone) {
     const timeRaw = sheetField(row, ["S_Time", "STime", "Schedule Time", "Send Time"]);
     const date = parseSheetDate(dateRaw);
     const time = parseSheetTime(timeRaw) || parseSheetTime(dateRaw);
+    if (date && !time) {
+      const today = localDateValue(new Date());
+      if (date <= today) return { email: row.email, date, time: "now", unix: Math.floor(Date.now() / 1000) };
+      return null;
+    }
     if (!date || !time) return null;
     return { email: row.email, date, time, unix: zonedToUnix(date, time, zone) };
   }).filter(Boolean);
@@ -1776,7 +1781,7 @@ async function sendCampaign(action, options) {
   const toParts = document.getElementById("to-input").value.split(/[\s,;]+/).map((part) => part.trim()).filter(Boolean);
   const bad = toParts.filter((part) => !EMAIL_RE.test(normalizeEmail(part)));
   if (bad.length) throw new Error("Fix the To field: " + bad[0]);
-  const scheduled = Boolean(options && options.schedule) || document.getElementById("schedule-on").checked;
+  let scheduled = Boolean(options && options.schedule) || document.getElementById("schedule-on").checked;
   let scheduleAt = null;
   let scheduleNote = "";
   const zone = document.getElementById("schedule-zone").value || "UTC";
@@ -1785,13 +1790,19 @@ async function sendCampaign(action, options) {
     const fromSheet = Boolean(options && options.fromSheet) && found.length > 0;
     if (fromSheet) {
       found.sort((left, right) => left.unix - right.unix);
-      scheduleAt = found[0].unix;
       const distinct = new Set(found.map((item) => `${item.date} ${item.time}`)).size;
       const missing = rows.length - found.length;
-      scheduleNote = distinct > 1
-        ? `First row sends ${found[0].date} ${found[0].time}. ${distinct} different S_Date and S_Time values; each row waits for its own.`
-        : `S_Date ${found[0].date} and S_Time ${found[0].time} from the sheet.`;
-      if (missing) scheduleNote += ` ${missing} rows have no sheet time and use that first time.`;
+      if (found[0].time === "now") {
+        scheduled = false;
+        scheduleAt = null;
+        scheduleNote = "S_Time is blank, so the message sends now. It is filed in the sender Sent folder and delivered to the receiver inbox.";
+      } else {
+        scheduleAt = found[0].unix;
+        scheduleNote = distinct > 1
+          ? `First row sends ${found[0].date} ${found[0].time}. ${distinct} different S_Date and S_Time values; each row waits for its own.`
+          : `S_Date ${found[0].date} and S_Time ${found[0].time} from the sheet.`;
+      }
+      if (missing && found[0].time !== "now") scheduleNote += ` ${missing} rows have no sheet time and use that first time.`;
     } else {
       ensureScheduleClock();
       const date = (document.getElementById("schedule-date") || {}).value || "";
