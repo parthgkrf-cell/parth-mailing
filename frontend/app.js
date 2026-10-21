@@ -127,9 +127,9 @@ function setComposerMode(mode) {
   else composer.classList.add("is-" + mode);
 }
 
-function openModal(html) {
+function openModal(html, wide) {
   const root = document.getElementById("modal-root");
-  root.innerHTML = `<div class="modal-card glass" role="dialog">${html}</div>`;
+  root.innerHTML = `<div class="modal-card glass${wide ? " modal-wide" : ""}" role="dialog">${html}</div>`;
   root.classList.remove("hidden");
   icons();
 }
@@ -269,46 +269,98 @@ function renderView() {
   if (state.view === "preview") paintFullPreview();
 }
 
+function senderOptionLabel(sender) {
+  const name = String((sender && (sender.display_name || sender.email)) || "Mailbox");
+  const email = String((sender && sender.email) || "");
+  const sim = sender && sender.live === false ? " (simulated)" : "";
+  if (email && name.toLowerCase() !== email.toLowerCase()) return `${name} · ${email}${sim}`;
+  return `${email || name}${sim}`;
+}
+
+function mailboxQuota(sender) {
+  const rows = (state.ledger && state.ledger.mailbox_quota) || [];
+  return rows.find((item) => item.id === sender.id) || null;
+}
+
+function mailboxQuotaLine(sender) {
+  const box = mailboxQuota(sender);
+  if (!box) return sender.status === "approved" ? "Assigned to this account" : "Waiting on admin";
+  const kind = box.kind === "gmail" ? "Gmail 400" : "Workspace 1,800";
+  return `${Number(box.sent || 0).toLocaleString()} sent · ${Number(box.left || 0).toLocaleString()} left of ${Number(box.cap || 0).toLocaleString()} · ${kind}`;
+}
+
 function htmlHome() {
   const approved = state.catalog.filter((sender) => sender.status === "approved");
   const pending = state.catalog.filter((sender) => sender.status === "pending");
   const ledger = state.ledger || {};
-  const limits = ledger.limits || {};
   const banner = state.ui && state.ui.banner
     ? `<section class="card glass"><p>${esc(state.ui.banner)}</p></section>`
     : "";
   const recent = state.campaigns.slice(0, 4).map(campaignCard).join("") || `<div class="card glass"><p>No campaigns yet.</p></div>`;
-  const senders = state.catalog.map((sender) => `
+  const mailboxQuery = state.mailboxQuery || "";
+  const visibleMailboxes = state.catalog.filter((sender) => {
+    if (!mailboxQuery) return true;
+    return `${sender.display_name || ""} ${sender.email || ""}`.toLowerCase().includes(mailboxQuery.toLowerCase());
+  });
+  const senders = visibleMailboxes.map((sender) => `
     <div class="spread">
-      <div><strong>${esc(sender.display_name || sender.email || "Mailbox")}</strong><div class="hint">${esc(sender.email || "")}</div></div>
+      <div><strong>${esc(senderOptionLabel(sender))}</strong><div class="hint">${esc(mailboxQuotaLine(sender))}</div></div>
       <div class="row">
         ${statusBadge(sender.status)}
         ${sender.status === "approved" || isMasterUser() ? "" : sender.status === "pending"
           ? `<span class="hint">Waiting on admin</span>`
           : `<button class="btn btn-ghost" type="button" data-action="request-sender" data-id="${esc(sender.id)}">Request this email</button>`}
       </div>
-    </div>`).join("") || `<p>${isMasterUser() ? "Add sending emails in Configuration." : "No sending emails are listed yet. Type the mailbox you need below."}</p>`;
+    </div>`).join("") || `<p>${mailboxQuery ? "No mailbox matches that search." : (isMasterUser() ? "Add sending emails in Configuration." : "No mailing account is assigned yet. Ask the admin to assign one, or request an address below.")}</p>`;
+  const mailboxFilter = state.catalog.length > 6
+    ? `<input id="mailbox-filter" class="input" placeholder="Find by name or email" value="${esc(mailboxQuery)}">`
+    : "";
   const requestBox = isMasterUser() ? "" : `
     <label>Request a sending email
       <input id="request-mailbox" class="input" placeholder="sales@gr-conferences.com">
     </label>
     <div class="row"><button class="btn btn-primary" type="button" data-action="request-mailbox">Send request to admin</button></div>
-    <p class="hint">You can send and draft only from mailboxes approved for this account. Admin is notified when you request another one.</p>`;
+    <p class="hint">You can send and draft only from mailboxes the admin assigned to this account.</p>`;
+  const mailboxCard = `
+    <section class="card glass stack" id="my-mailboxes">
+      <div class="spread"><h3>Your mailing accounts</h3><span class="hint">${approved.length} assigned</span></div>
+      <p class="hint">These are the accounts the admin assigned. The same list is in the composer From line.</p>
+      ${mailboxFilter}
+      ${senders}
+      ${requestBox}
+    </section>`;
   const company = ledger.company_daily_cap
     ? `<article class="card glass stat"><span class="hint">Company left today</span><strong>${Number(ledger.company_remaining || 0).toLocaleString()}</strong><span class="hint">Shared ceiling ${Number(ledger.company_daily_cap).toLocaleString()}</span></article>`
     : "";
+  const quotaCards = `
+    <div class="stat-grid quota-grid">
+      <article class="card glass stat">
+        <span class="hint">Total email limit</span>
+        <strong>${Number(ledger.total_limit || 0).toLocaleString()}</strong>
+        <span class="hint">Gmail 400 · Workspace 1,800</span>
+      </article>
+      <article class="card glass stat">
+        <span class="hint">Total sent email</span>
+        <strong>${Number(ledger.total_sent || 0).toLocaleString()}</strong>
+        <span class="hint">Sent in the last 24 hours</span>
+      </article>
+      <article class="card glass stat">
+        <span class="hint">Total left email</span>
+        <strong>${Number(ledger.total_left || 0).toLocaleString()}</strong>
+        <span class="hint">Still available on assigned accounts</span>
+      </article>
+    </div>`;
   return `
     ${banner}
+    ${quotaCards}
+    ${mailboxCard}
     <div class="stat-grid">
-      <article class="card glass stat"><span class="hint">All sent and stored</span><strong>${Number(ledger.sent_total || 0).toLocaleString()}</strong><span class="hint">This account ${Number(ledger.mine_total || 0).toLocaleString()} · ${Number(ledger.used_day || 0).toLocaleString()} in 24 hours</span></article>
-      <article class="card glass stat"><span class="hint">Left today</span><strong>${ledger.remaining_day == null ? "—" : Number(ledger.remaining_day).toLocaleString()}</strong><span class="hint">of ${Number(limits.per_day || 0).toLocaleString()} for this account</span></article>
-      <article class="card glass stat"><span class="hint">People already emailed</span><strong>${Number(ledger.unique_people || 0).toLocaleString()}</strong><span class="hint">${ledger.block_repeat_recipients === false ? "Repeat sends are allowed" : "A second email is blocked"}</span></article>
+      <article class="card glass stat"><span class="hint">People already emailed</span><strong>${Number(ledger.unique_people || 0).toLocaleString()}</strong><span class="hint">One list sends each address once. Uploading the Excel again sends that list again.</span></article>
       ${company}
       <article class="card glass stat"><span class="hint">Approved senders</span><strong>${approved.length}</strong></article>
       <article class="card glass stat"><span class="hint">Waiting on admin</span><strong>${pending.length}</strong></article>
     </div>
-    <p class="hint">These counts live in the relay database. Closing the browser or the app does not reset them, and another account cannot send a second message to someone already emailed.</p>
-    <section class="card glass stack"><h3>Sending emails</h3>${senders}${requestBox}</section>
+    <p class="hint">Each Gmail mailbox can send 400 emails in 24 hours. Each Workspace mailbox can send 1,800. The three totals add the mailboxes assigned to this login.</p>
     <section class="stack"><h3>Recent campaigns</h3>${recent}</section>`;
 }
 
@@ -325,7 +377,7 @@ function htmlRecipients() {
       <div class="row">
         <button class="btn btn-primary" type="button" data-action="fetch-sheet">Fetch sheet</button>
       </div>
-      <p class="hint">Use columns Email, Name, Template, Sender Name, Account Email, S_Date, and S_Time. S_Date and S_Time set when Start Scheduling sends each row. Account Email must be a mailbox this login is allowed to use. Other mailing accounts in the sheet are left out.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
+      <p class="hint">Receiver email is who gets the message. Sender email, or Account Email, is the mailbox that sends it, such as parth@gr-conferences.com. Sender Name is the name people see, such as ICTCS Conference Support. CC on that row is copied on the message. The mailbox label is not used when Sender Name is filled in. S_Date and S_Time still set the schedule. Sender email must be a mailbox this login is allowed to use.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
       <div id="dropzone" class="dropzone">
         <p>Or drop .xlsx, .xls, or .csv files here</p>
         <p class="hint">In the message, {Affiliation} uses that column’s name and {E} uses column E. The same works for every Excel column.</p>
@@ -352,7 +404,7 @@ function htmlRecipients() {
         <h3>Recipient window</h3>
         <input id="recipient-search" class="input" style="max-width:260px" placeholder="Search" value="${esc(state.recipientQuery)}">
       </div>
-      <div class="vhead"><span>#</span><span>Email</span><span>Name</span><span>Company</span><span>Template</span><span>Sender name</span></div>
+      <div class="vhead"><span>#</span><span>Receiver email</span><span>Sender email</span><span>Name</span><span>Sender name</span><span>CC</span></div>
       <div class="vscroll" id="recipient-scroller"><div id="recipient-spacer"><div id="recipient-rows"></div></div></div>
     </section>`;
 }
@@ -368,13 +420,46 @@ function fieldOf(row, ...names) {
   return "";
 }
 
+function looseKey(value) {
+  return String(value || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+}
+
+const MAILBOX_KEYS = ["accountemail", "fromemail", "senderemail", "mailbox", "mailingemail", "sendingemail", "fromaddress", "sendfrom", "sendusing", "sendingaccount", "fromaccount", "mailfrom", "senderaccount", "frommailbox", "emailaccount"];
+const NAME_KEYS = ["sendername", "fromname", "displayname", "senderdisplayname", "nameofsender"];
+const CC_KEYS = ["cc", "ccemail", "ccmail", "ccaddress", "carboncopy", "copyto", "emailcc"];
+
+function looseField(row, keys) {
+  const fields = row && row.fields ? row.fields : {};
+  const wanted = new Set(keys);
+  for (const key of Object.keys(fields)) {
+    if (wanted.has(looseKey(key)) && String(fields[key] || "").trim()) return String(fields[key]).trim();
+  }
+  return "";
+}
+
+function rowSendingAccount(row) {
+  const named = looseField(row, MAILBOX_KEYS);
+  if (EMAIL_RE.test(normalizeEmail(named))) return normalizeEmail(named);
+  const sender = normalizeEmail(row && row.sender);
+  return EMAIL_RE.test(sender) ? sender : "";
+}
+
+function rowSenderName(row) {
+  const named = looseField(row, NAME_KEYS) || (row && row.sender_name) || "";
+  if (named && !EMAIL_RE.test(normalizeEmail(named))) return named;
+  const sender = String((row && row.sender) || "").trim();
+  if (sender && !EMAIL_RE.test(normalizeEmail(sender))) return sender;
+  return "";
+}
+
 function htmlCompose() {
   const approved = state.catalog.filter((sender) => sender.status === "approved");
   return `
     <section class="card glass stack">
       <h3>Composer</h3>
       <p class="hint">SMTP Draft saves every message to the selected mailbox Drafts folder. SMTP Send delivers one by one under Gmail policy. If you have more than one assigned mailbox, Send threads them in parallel.</p>
-      <p class="hint">${approved.length ? `Approved mailboxes: ${approved.map((item) => item.display_name || "Mailbox").join(", ")}` : "No sending mailbox yet. Ask the admin to assign one to your name."}</p>
+        <p class="hint">${approved.length ? `Approved mailboxes: ${approved.map((item) => item.display_name || "Mailbox").join(", ")}` : "No sending mailbox yet. Ask the admin to assign one to your name."}</p>
+        <p class="hint">Use Add HTML in the composer to paste an email design or choose an .html file. It is saved as a template on this browser.</p>
       <div class="row">
         <button class="btn btn-primary" type="button" data-action="open-composer">Open composer</button>
         <button class="btn btn-ghost" type="button" data-action="nav" data-view="preview">Open preview</button>
@@ -391,7 +476,7 @@ function htmlPreview() {
   return `
     <section class="card glass stack">
       <h3>Recipient preview</h3>
-      <p class="hint">Pick a row from the imported Excel list. Sender name comes from the Sender Name column when present.</p>
+      <p class="hint">Pick a row from the imported Excel list. Sender email and Receiver email come from that row. A link opens in a new tab. Click here to unsubscribe opens a Gmail message to conference.ictcs@gmail.com.</p>
       <label>Recipient
         <select id="preview-pick" class="input">${options || "<option>Import Excel first</option>"}</select>
       </label>
@@ -507,7 +592,7 @@ function htmlConfig() {
     ${htmlMailboxSetup()}
     <section class="card glass stack">
       <h3>GA4 link tagging</h3>
-      <p class="hint">UTM tags are added to http(s) links in the campaign before the # fragment, then used on every send.</p>
+      <p class="hint">Build one tracked link with GA4 link in the composer. These fields tag every website link in the message when Tag links on send is on. In GA4, open Reports, then Acquisition, then Traffic acquisition.</p>
       <label class="check-line"><input id="ga4-enabled" type="checkbox" ${tracking.enabled ? "checked" : ""}> Tag links on send</label>
       <div class="config-grid">
         <label>utm_source<input id="ga4-source" class="input" value="${esc(tracking.source || "")}" placeholder="parth-mailing"></label>
@@ -543,7 +628,7 @@ function campaignCard(campaign) {
         ${undelivered ? statusBadge("not delivered") : statusBadge(campaign.status)}
       </div>
       <div class="bar"><span style="width:${pct}%"></span></div>
-      <div class="hint">${campaign.sent_count || 0} sent · ${drafted} drafted · ${campaign.failed_count || 0} failed · ${campaign.bounced_count || 0} bounced · ${skipped} already emailed · ${campaign.total_count || 0} total</div>
+      <div class="hint">${campaign.sent_count || 0} sent · ${drafted} drafted · ${campaign.failed_count || 0} failed · ${campaign.bounced_count || 0} bounced · ${skipped} skipped · ${campaign.total_count || 0} total</div>
       ${campaign.hold_reason && campaign.hold_reason !== campaign.last_error ? `<div class="note">${esc(campaign.hold_reason)}</div>` : ""}
       ${(campaign.last_error || ((campaign.failed_count || campaign.bounced_count) && campaign.hold_reason)) ? `<p class="fail-reason"><strong>Failed:</strong> ${esc(campaign.last_error || campaign.hold_reason)}</p>` : ""}
       ${campaign.schedule_at ? `<div class="hint">Scheduled ${esc(stamp(campaign.schedule_at))} (${esc(campaign.timezone)})</div>` : ""}
@@ -556,6 +641,7 @@ function campaignCard(campaign) {
         ${upload ? `<a class="btn btn-ghost" href="${esc(upload)}" target="_blank" rel="noopener">Drive upload</a>` : ""}
         ${report ? `<a class="btn btn-ghost" href="${esc(report)}" target="_blank" rel="noopener">Drive report</a>` : ""}
       </div>
+      <p class="hint">Download campaign_report.xlsx for Receiver email and Sender email on every row. A new Drive report uses the same columns.</p>
     </article>`;
 }
 
@@ -572,30 +658,74 @@ function htmlHistory() {
   return `<section class="stack">${rows.map(campaignCard).join("") || `<div class="card glass"><p>Finished campaigns will land here with their report.</p></div>`}</section>`;
 }
 
+function senderCatalog() {
+  const rows = (state.masterSenders && state.masterSenders.length) ? state.masterSenders : state.catalog;
+  return rows.filter((sender) => sender && sender.id && (sender.email || sender.user));
+}
+
+function assignedLabels(user) {
+  const owned = new Set(user.sender_ids || []);
+  return senderCatalog().filter((sender) => owned.has(sender.id)).map((sender) => sender.display_name || sender.email);
+}
+
+function htmlMailboxAssign(user) {
+  const senders = senderCatalog();
+  const owned = new Set(user.sender_ids || []);
+  if (!senders.length) return `<p class="hint">Add mailing accounts above, then assign them here.</p>`;
+  const boxes = senders.map((sender) => `
+    <label class="check-line assign-choice">
+      <input type="checkbox" data-assign-box="${esc(user.email)}" value="${esc(sender.id)}" ${owned.has(sender.id) ? "checked" : ""}>
+      <span><strong>${esc(sender.display_name || sender.email)}</strong><span class="hint"> ${esc(sender.email || "")}</span></span>
+    </label>`).join("");
+  return `
+    <div class="assign-grid">${boxes}</div>
+    <div class="row"><button class="btn btn-primary" type="button" data-action="assign-sender" data-email="${esc(user.email)}">Save mailboxes</button></div>`;
+}
+
 function htmlMaster() {
   if (!isMasterUser()) return "";
   const query = state.userQuery || "";
-  const senderOptions = state.catalog.map((sender) => `<option value="${esc(sender.id)}">${esc(sender.display_name || sender.email || sender.id)}</option>`).join("");
-  const users = state.users.filter((user) => !query || `${user.display_name || ""} ${user.email}`.toLowerCase().includes(query.toLowerCase())).map((user) => `
-    <div class="spread">
-      <div><strong>${esc(user.display_name || (user.email === adminEmail() ? "Admin" : "User"))}</strong><div class="hint">${esc(user.email)} · ${user.sent_total || 0} stored · ${user.sent_today} in 24h · ${user.password_set ? "password set" : "needs OTP"}</div></div>
-      <div class="row">
-        <select class="input" style="max-width:180px" data-assign-select="${esc(user.email)}">${senderOptions}</select>
-        <button class="btn btn-primary" type="button" data-action="assign-sender" data-email="${esc(user.email)}">Give mailbox</button>
-        <button class="switch ${user.enabled ? "on" : ""}" type="button" data-action="toggle-user" data-email="${esc(user.email)}" data-enabled="${user.enabled}" aria-label="Enable account"></button>
-        <button class="btn btn-ghost" type="button" data-action="edit-limits" data-email="${esc(user.email)}">Limits</button>
-        ${user.email === adminEmail() ? "" : `<button class="btn btn-danger" type="button" data-action="remove-user" data-email="${esc(user.email)}">Remove</button>`}
+  const users = state.users.filter((user) => !query || `${user.display_name || ""} ${user.email}`.toLowerCase().includes(query.toLowerCase())).map((user) => {
+    const isAdmin = normalizeEmail(user.email) === adminEmail() || user.role === "ROLE_MASTER";
+    const labels = assignedLabels(user);
+    return `
+    <article class="stack assign-card">
+      <div class="spread">
+        <div>
+          <strong>${esc(user.display_name || (isAdmin ? "Admin" : "User"))}</strong>
+          <div class="hint">${esc(user.email)} · ${user.sent_total || 0} stored · ${user.sent_today} in 24h · ${user.password_set ? "password set" : "needs OTP"}</div>
+          <div class="hint">${isAdmin ? "Admin can send from every mailing account." : (labels.length ? `Mailboxes: ${esc(labels.join(", "))}` : "No mailing account assigned yet.")}</div>
+        </div>
+        <div class="row">
+          <button class="switch ${user.enabled ? "on" : ""}" type="button" data-action="toggle-user" data-email="${esc(user.email)}" data-enabled="${user.enabled}" aria-label="Enable account"></button>
+          <button class="btn btn-ghost" type="button" data-action="edit-limits" data-email="${esc(user.email)}">Limits</button>
+          ${isAdmin ? "" : `<button class="btn btn-danger" type="button" data-action="remove-user" data-email="${esc(user.email)}">Remove</button>`}
+        </div>
       </div>
-    </div>`).join("") || `<p>No accounts yet.</p>`;
-  const approvals = state.approvals.filter((item) => item.status === "pending").map((item) => `
+      ${isAdmin ? "" : htmlMailboxAssign(user)}
+    </article>`;
+  }).join("") || `<p>No accounts yet.</p>`;
+  const queueItems = state.approvals.filter((item) => item.status === "pending" || item.status === "denied");
+  const requestRows = queueItems.map((item) => `
     <div class="spread">
-      <div><strong>${esc(accountLabel(item.email))}</strong><div class="hint">Request access to ${esc(item.sender_email || "a mailbox")}</div></div>
+      <div>
+        <strong>${esc(accountLabel(item.email))}</strong>
+        <div class="hint">${item.status === "denied" ? "Denied, still not approved" : "Waiting for approval"} · ${esc(item.sender_email || "a mailbox")} · ${esc(stamp(item.requested_at))}</div>
+      </div>
       <div class="row">
+        ${statusBadge(item.status)}
         <input class="input" style="max-width:120px" data-cap="${item.id}" type="number" min="1" placeholder="Max / day" value="${esc(item.daily_cap || "")}">
         <button class="btn btn-primary" type="button" data-action="decide" data-op="approve" data-id="${item.id}">Approve</button>
-        <button class="btn btn-danger" type="button" data-action="decide" data-op="deny" data-id="${item.id}">Deny</button>
+        ${item.status === "pending" ? `<button class="btn btn-danger" type="button" data-action="decide" data-op="deny" data-id="${item.id}">Deny</button>` : ""}
       </div>
-    </div>`).join("") || `<p>The approval queue is clear.</p>`;
+    </div>`).join("");
+  const waitingUsers = state.users.filter((user) => normalizeEmail(user.email) !== adminEmail() && user.role !== "ROLE_MASTER" && !(user.sender_ids || []).length);
+  const waitingRows = waitingUsers.map((user) => `
+    <article class="stack assign-card">
+      <div><strong>${esc(accountLabel(user.email))}</strong><div class="hint">Signed up and has no sending mailbox yet. Check every account this user may send from.</div></div>
+      ${htmlMailboxAssign(user)}
+    </article>`).join("");
+  const approvals = (requestRows + waitingRows) || `<p>The approval queue is clear.</p>`;
   const live = ((state.monitor && state.monitor.campaigns) || []).map(campaignCard).join("") || `<p>No live queues.</p>`;
   const boxes = ((state.monitor && state.monitor.mailboxes) || []).map((box) => `
     <article class="card glass stat"><span class="hint">Internal mailbox</span><strong>${box.remaining}</strong><span class="hint">${box.used_24h} of ${box.cap_24h} in 24h · ${box.live ? "live" : "simulated"}</span></article>`).join("");
@@ -603,6 +733,7 @@ function htmlMaster() {
     <div class="hint">${esc(stamp(item.created_at))} · ${esc(maskAddress(item.actor))} · ${esc(item.action)} · ${esc(maskAddress(item.detail || ""))}</div>`).join("") || `<p>No audit events yet.</p>`;
   const drive = (state.health && state.health.drive) || {};
   return `
+    <section class="card glass stack" id="approval-queue"><h3>Access approval queue</h3>${approvals}</section>
     ${htmlMailboxSetup()}
     <section class="card glass stack" id="admin-setup">
       <h3>Work setup</h3>
@@ -627,7 +758,6 @@ function htmlMaster() {
     </section>
     <div class="stat-grid">${boxes}</div>
     <section class="card glass stack"><div class="spread"><h3>Accounts</h3><input id="user-search" class="input" style="max-width:240px" placeholder="Filter" value="${esc(query)}"></div>${users}</section>
-    <section class="card glass stack"><h3>Access approval queue</h3>${approvals}</section>
     <section class="stack"><div class="spread"><h3>Live queues</h3></div>${live}</section>
     <section class="card glass stack"><h3>Audit</h3>${audit}</section>
     <section class="card glass stack">
@@ -655,7 +785,6 @@ function htmlDeskForm() {
     ["show_cc", "Cc and Bcc"],
     ["show_variables", "Variable buttons"],
     ["allow_theme_toggle", "Theme toggle"],
-    ["block_repeat_recipients", "Block a second email to the same person"],
   ];
   const boxes = checks.map(([key, label]) => `
     <label class="check-line"><input type="checkbox" data-desk="${key}" ${ui[key] === false ? "" : "checked"}> ${esc(label)}</label>`).join("");
@@ -702,7 +831,7 @@ function deskDirty() {
   const flags = [
     "show_desk", "show_recipients", "show_campaigns", "show_history", "show_compose",
     "show_preview", "show_pace", "show_schedule", "show_attachments", "show_cc", "show_variables",
-    "allow_theme_toggle", "block_repeat_recipients",
+    "allow_theme_toggle",
   ];
   return next.banner !== (ui.banner || "")
     || next.brand_name !== ui.brand_name
@@ -717,6 +846,14 @@ function deskDirty() {
     || next.force_theme !== (ui.force_theme || "")
     || JSON.stringify(next.labels) !== JSON.stringify(ui.labels)
     || flags.some((key) => Boolean(next[key]) !== Boolean(ui[key]));
+}
+
+function assignDirty() {
+  return [...document.querySelectorAll("[data-assign-box]")].some((box) => {
+    const user = (state.users || []).find((item) => item.email === box.dataset.assignBox);
+    const owned = new Set((user && user.sender_ids) || []);
+    return box.checked !== owned.has(box.value);
+  });
 }
 
 function readDeskForm() {
@@ -867,10 +1004,10 @@ function mountRecipients() {
       <div class="rrow rgrid">
         <span>${(start + index + 1).toLocaleString()}</span>
         <span>${esc(row.email)}</span>
+        <span>${esc(rowSendingAccount(row))}</span>
         <span>${esc(row.first_name || fieldOf(row, "Name"))}</span>
-        <span>${esc(row.company)}</span>
-        <span>${esc(fieldOf(row, "Template") || row.template || "")}</span>
-        <span>${esc(fieldOf(row, "Sender Name", "Sender") || row.sender_name || "")}</span>
+        <span>${esc(rowSenderName(row))}</span>
+        <span>${esc(looseField(row, CC_KEYS))}</span>
       </div>`).join("");
     const valid = document.getElementById("stat-valid");
     if (valid) valid.textContent = `${state.recipients.length.toLocaleString()} ready`;
@@ -890,18 +1027,43 @@ function renderVars() {
   bar.innerHTML = shown.map((name) => `<button type="button" data-action="insert-var" data-token="{${esc(name)}}" title="Insert {${esc(name)}}">{${esc(name)}}</button>`).join("");
 }
 
+function rememberSheetAddresses() {
+  const rows = state.recipients;
+  const accounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
+  state.sheetMailbox = accounts.length === 1 ? accounts[0] : "";
+  state.sheetMailboxApplied = false;
+  const to = document.getElementById("to-input");
+  const receivers = rows.map((row) => row.email).filter(Boolean);
+  if (to && receivers.length && receivers.length <= 30) to.value = receivers.join(", ");
+  applySheetMailbox();
+  updatePreview();
+}
+
+function applySheetMailbox() {
+  const select = document.getElementById("from-select");
+  if (!select || !state.sheetMailbox || state.sheetMailboxApplied) return;
+  const match = (state.catalog || []).find((item) => normalizeEmail(item.email) === state.sheetMailbox);
+  if (!match || ![...select.options].some((option) => option.value === match.id)) return;
+  select.value = match.id;
+  state.sheetMailboxApplied = true;
+}
+
 function fillSenders() {
   const select = document.getElementById("from-select");
   const approved = state.catalog.filter((sender) => sender.status === "approved");
   const signature = approved.map((sender) => `${sender.id}:${sender.live ? 1 : 0}`).join("|");
   state.hasGrant = approved.length > 0;
-  if (select.dataset.sig === signature) return;
+  if (select.dataset.sig === signature) {
+    applySheetMailbox();
+    return;
+  }
   const current = select.value;
   select.dataset.sig = signature;
   select.innerHTML = approved.length
-    ? approved.map((sender) => `<option value="${esc(sender.id)}">${esc(sender.display_name || "Internal mailbox")}${sender.live === false ? " (simulated)" : ""}</option>`).join("")
+    ? approved.map((sender) => `<option value="${esc(sender.id)}">${esc(senderOptionLabel(sender))}</option>`).join("")
     : `<option value="">No approved sender</option>`;
   if ([...select.options].some((option) => option.value === current)) select.value = current;
+  applySheetMailbox();
 }
 
 function fillZones() {
@@ -951,6 +1113,9 @@ function applyVars(template, row) {
     Sender: fieldOf(row, "Sender Name", "Sender") || row.sender_name || "",
     Template: fieldOf(row, "Template") || row.template || "",
   }, row.fields || {});
+  if (row.email && !String(map["Receiver email"] || map["Reciver email"] || "").trim()) map["Receiver email"] = row.email;
+  const senderMail = rowSendingAccount(row);
+  if (senderMail && !String(map["Sender email"] || "").trim()) map["Sender email"] = senderMail;
   const lookup = (match, key) => {
     const needle = String(key || "").toLowerCase().replace(/\s+/g, "");
     const found = Object.keys(map).find((name) => name.toLowerCase().replace(/\s+/g, "") === needle);
@@ -1024,6 +1189,8 @@ function restoreComposer(payload) {
   if (payload.schedule_zone) set("schedule-zone", payload.schedule_zone);
   document.getElementById("schedule-on").checked = Boolean(payload.schedule_on);
   document.getElementById("schedule-fields").classList.toggle("hidden", !payload.schedule_on);
+  const scheduleHint = document.getElementById("schedule-hint");
+  if (scheduleHint) scheduleHint.classList.toggle("hidden", !payload.schedule_on);
   document.getElementById("editor").innerHTML = payload.html || "";
   if (payload.cc || payload.bcc) document.getElementById("cc-fields").classList.remove("hidden");
   paintSendLabel();
@@ -1035,8 +1202,12 @@ function templateId() {
 }
 
 function persistTemplates() {
-  localStorage.setItem("parth.templates", JSON.stringify(state.templates));
-  localStorage.setItem("parth.activeTemplate", state.activeTemplateId || "");
+  try {
+    localStorage.setItem("parth.templates", JSON.stringify(state.templates));
+    localStorage.setItem("parth.activeTemplate", state.activeTemplateId || "");
+  } catch (error) {
+    throw new Error("This browser cannot store that HTML template. Use a smaller file.");
+  }
 }
 
 function loadTemplates() {
@@ -1067,8 +1238,112 @@ function captureTemplate() {
   const editor = document.getElementById("editor");
   if (!current || !subject || !editor) return;
   current.subject = subject.value;
-  current.html = editor.innerHTML;
+  if (!current.rawHtml) current.html = editor.innerHTML;
   persistTemplates();
+}
+
+function openAddress(href) {
+  window.location.href = href;
+}
+
+function unsubscribeHref(email) {
+  const who = String(email || "{Email}");
+  const body = `Please unsubscribe ${who}.`.replace(/ /g, "%20");
+  return `mailto:conference.ictcs@gmail.com?subject=Unsubscribe&body=${body}`;
+}
+
+function gmailComposeUrl(mailto) {
+  const raw = String(mailto || "").replace(/&amp;/gi, "&").trim();
+  const match = raw.match(/^mailto:([^?\s]+)(?:\?([\s\S]*))?/i);
+  if (!match) return "";
+  let to = match[1];
+  try { to = decodeURIComponent(match[1]); } catch (error) { to = match[1]; }
+  const query = new URLSearchParams(match[2] || "");
+  const url = new URL("https://mail.google.com/mail/");
+  url.searchParams.set("view", "cm");
+  url.searchParams.set("fs", "1");
+  url.searchParams.set("to", to);
+  url.searchParams.set("su", query.get("subject") || "Unsubscribe");
+  const body = query.get("body");
+  if (body) url.searchParams.set("body", body);
+  return url.toString();
+}
+
+function previewGmailLinks(html) {
+  return String(html || "").replace(/href=(["'])(mailto:[^"']+)\1/gi, (match, quote, url) => {
+    const plain = url.replace(/&amp;/gi, "&");
+    if (!/conference\.ictcs@gmail\.com/i.test(plain)) return match;
+    const gmail = gmailComposeUrl(plain);
+    return gmail ? `href=${quote}${esc(gmail)}${quote}` : match;
+  });
+}
+
+function linkUnsubscribeHtml(html, email) {
+  const href = esc(unsubscribeHref(email));
+  return String(html || "").split(/(<a\b[^>]*>[\s\S]*?<\/a>)/gi).map((part) => {
+    if (/^<a\b/i.test(part)) return part;
+    return part.replace(/click\s+here\s+to\s+unsubscribe/gi, (phrase) => `<a href="${href}">${phrase}</a>`);
+  }).join("");
+}
+
+function externalPreviewHtml(html) {
+  const base = '<base target="_blank">';
+  const doc = previewGmailLinks(String(html || ""));
+  if (/<base\b/i.test(doc)) return doc;
+  if (/<head[^>]*>/i.test(doc)) return doc.replace(/<head[^>]*>/i, (match) => match + base);
+  if (/<html[^>]*>/i.test(doc)) return doc.replace(/<html[^>]*>/i, (match) => `${match}<head>${base}</head>`);
+  return `<!DOCTYPE html><html><head>${base}</head><body>${doc}</body></html>`;
+}
+
+function armExternalLinks(frame) {
+  if (!frame || frame.dataset.externalLinks) return;
+  frame.dataset.externalLinks = "1";
+  frame.addEventListener("load", () => bindExternalLinks(frame));
+}
+
+function bindExternalLinks(frame) {
+  let doc;
+  try { doc = frame.contentDocument; } catch (error) { return; }
+  if (!doc || !doc.documentElement || doc.documentElement.dataset.externalLinks) return;
+  doc.documentElement.dataset.externalLinks = "1";
+  doc.addEventListener("click", (event) => {
+    const node = event.target;
+    const link = node && node.closest ? node.closest("a[href]") : null;
+    if (!link) return;
+    const href = link.getAttribute("href") || "";
+    if (!href || href.charAt(0) === "#") return;
+    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+    if (/^mailto:/i.test(href) && /conference\.ictcs@gmail\.com/i.test(href)) {
+      event.preventDefault();
+      const gmail = gmailComposeUrl(link.href);
+      if (gmail) window.open(gmail, "_blank", "noopener,noreferrer");
+      return;
+    }
+    if (/^(mailto|tel):/i.test(href)) {
+      event.preventDefault();
+      openAddress(link.href);
+      return;
+    }
+    event.preventDefault();
+    window.open(link.href, "_blank", "noopener,noreferrer");
+  });
+}
+
+function showHtmlTemplate(raw) {
+  const view = document.getElementById("html-template-view");
+  const frame = document.getElementById("html-template-frame");
+  const composer = document.getElementById("composer");
+  if (!view || !frame || !composer) return;
+  if (raw) {
+    composer.classList.add("is-html");
+    view.classList.remove("hidden");
+    armExternalLinks(frame);
+    frame.srcdoc = externalPreviewHtml(linkUnsubscribeHtml(raw));
+  } else {
+    composer.classList.remove("is-html");
+    view.classList.add("hidden");
+    frame.removeAttribute("srcdoc");
+  }
 }
 
 function applyTemplate(template) {
@@ -1076,20 +1351,76 @@ function applyTemplate(template) {
   const subject = document.getElementById("subject-input");
   const editor = document.getElementById("editor");
   if (subject) subject.value = template.subject || "";
-  if (editor) editor.innerHTML = template.html || "";
+  showHtmlTemplate(template.rawHtml || "");
+  if (editor && !template.rawHtml) editor.innerHTML = template.html || "";
   updatePreview();
+}
+
+function composerHtml() {
+  const current = activeTemplate();
+  if (current && current.rawHtml) return current.rawHtml;
+  const editor = document.getElementById("editor");
+  return editor ? editor.innerHTML : "";
+}
+
+function plainFromHtml(value) {
+  const box = document.createElement("div");
+  box.innerHTML = String(value || "");
+  return (box.innerText || box.textContent || "").replace(/\s+/g, " ").trim();
+}
+
+function askHtmlTemplate(existing) {
+  return new Promise((resolve) => {
+    state.modalResolve = resolve;
+    state.modalMode = "html-template";
+    openModal(`
+      <h3>${existing ? "Edit HTML template" : "Add HTML template"}</h3>
+      <p>Paste the email HTML, or choose an .html file. Merge tags such as {Name} and {Affiliation} still work.</p>
+      <label>Template name<input id="html-template-name" class="input" maxlength="40" value="${esc(existing && existing.name || "")}" placeholder="Welcome"></label>
+      <label>Subject<input id="html-template-subject" class="input" value="${esc(existing && existing.subject || "")}" placeholder="Hello {Name}"></label>
+      <label>HTML<textarea id="html-template-source" class="input html-source" placeholder="<!DOCTYPE html>"></textarea></label>
+      <div class="row">
+        <button class="btn btn-ghost" type="button" id="html-template-pick">Choose HTML file</button>
+        <span id="html-template-file-name" class="hint"></span>
+        <input id="html-template-file" class="hidden" type="file" accept=".html,.htm,text/html">
+      </div>
+      <div class="row">
+        <button class="btn btn-ghost" type="button" data-action="modal-cancel">Cancel</button>
+        <button class="btn btn-primary" type="button" data-action="modal-html-save">${existing ? "Save HTML" : "Add template"}</button>
+      </div>`, true);
+    const area = document.getElementById("html-template-source");
+    if (area) area.value = (existing && existing.rawHtml) || "";
+    const file = document.getElementById("html-template-file");
+    const pick = document.getElementById("html-template-pick");
+    if (pick && file) pick.addEventListener("click", () => file.click());
+    if (file) file.addEventListener("change", () => {
+      const picked = file.files && file.files[0];
+      if (!picked) return;
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (area) area.value = String(reader.result || "").replace(/^\uFEFF/, "");
+        const nameInput = document.getElementById("html-template-name");
+        const label = document.getElementById("html-template-file-name");
+        if (label) label.textContent = picked.name;
+        if (nameInput && !nameInput.value.trim()) nameInput.value = picked.name.replace(/\.html?$/i, "").slice(0, 40);
+      };
+      reader.readAsText(picked);
+    });
+    const nameInput = document.getElementById("html-template-name");
+    if (nameInput && !nameInput.value) nameInput.focus();
+  });
 }
 
 function renderTemplates() {
   const list = document.getElementById("template-list");
   if (!list) return;
   const chips = state.templates.map((item) => (
-    `<button type="button" class="template-chip${item.id === state.activeTemplateId ? " is-on" : ""}" data-action="template-open" data-id="${esc(item.id)}">${esc(item.name)}</button>`
+    `<button type="button" class="template-chip${item.id === state.activeTemplateId ? " is-on" : ""}" data-action="template-open" data-id="${esc(item.id)}">${esc(item.name)}${item.rawHtml ? " · HTML" : ""}</button>`
   )).join("");
   const remove = state.templates.length > 1
     ? `<button type="button" class="template-chip" data-action="template-delete">Delete</button>`
     : "";
-  list.innerHTML = `${chips}<button type="button" class="template-chip" data-action="template-new">New</button>${remove}`;
+  list.innerHTML = `${chips}<button type="button" class="template-chip" data-action="template-new">New</button><button type="button" class="template-chip" data-action="template-html">Add HTML</button>${remove}`;
 }
 
 function liveCampaign() {
@@ -1173,6 +1504,26 @@ function parseSheetTime(value) {
   return `${String(hour).padStart(2, "0")}:${minute}`;
 }
 
+function localDateValue(date) {
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function ensureScheduleClock() {
+  const dateInput = document.getElementById("schedule-date");
+  const timeInput = document.getElementById("schedule-time");
+  if (timeInput && !timeInput.value) timeInput.value = "07:00";
+  if (dateInput && !dateInput.value) {
+    const next = new Date();
+    const [hour, minute] = String((timeInput && timeInput.value) || "07:00").split(":").map(Number);
+    const start = new Date(next.getFullYear(), next.getMonth(), next.getDate(), hour || 0, minute || 0, 0, 0);
+    if (start.getTime() <= Date.now() + 60 * 1000) next.setDate(next.getDate() + 1);
+    dateInput.value = localDateValue(next);
+  }
+}
+
 function sheetTimes(rows, zone) {
   return rows.map((row) => {
     const dateRaw = sheetField(row, ["S_Date", "SDate", "Schedule Date", "Send Date"]);
@@ -1253,6 +1604,8 @@ function resetImport(mode) {
   state.stats = { invalid: 0, duplicates: 0 };
   state.sourceFiles = [];
   state.columns = new Set(["FirstName", "LastName", "Company", "Custom1", "Email"]);
+  state.sheetMailbox = "";
+  state.sheetMailboxApplied = false;
 }
 
 async function fetchSheet() {
@@ -1264,7 +1617,7 @@ async function fetchSheet() {
   resetImport(mode);
   const data = await api("/api/sheets/fetch", { method: "POST", body: JSON.stringify({ url }) });
   (data.columns || []).forEach((column) => state.columns.add(column));
-  addRows(data.rows || []);
+  addRows(data.rows || [], true);
   renderVars();
   if (state.view === "recipients") renderView();
   const ready = (data.rows || []).length.toLocaleString();
@@ -1273,6 +1626,7 @@ async function fetchSheet() {
     const names = (data.blocked_mailboxes || []).join(", ");
     toast(`${Number(data.blocked).toLocaleString()} rows were left out because this account cannot use ${names || "that mailbox"}.`, "warn");
   }
+  rememberSheetAddresses();
 }
 
 async function importFiles(fileList) {
@@ -1290,6 +1644,7 @@ async function importFiles(fileList) {
   renderVars();
   paintChrome();
   if (state.view === "recipients") renderView();
+  rememberSheetAddresses();
   toast(`${state.recipients.length.toLocaleString()} recipients ready`);
 }
 
@@ -1298,7 +1653,7 @@ function runWorker(file) {
     const worker = new Worker("worker.js");
     worker.onmessage = (event) => {
       const message = event.data || {};
-      if (message.type === "chunk") addRows(message.rows || []);
+      if (message.type === "chunk") addRows(message.rows || [], true);
       if (message.type === "progress") {
         state.importCount = message.scanned || 0;
         paintChrome();
@@ -1323,16 +1678,19 @@ function runWorker(file) {
   });
 }
 
-function addRows(rows) {
+function addRows(rows, replaceExisting) {
   rows.forEach((row) => {
     const email = normalizeEmail(row.email);
     if (!EMAIL_RE.test(email)) return;
-    if (state.seen.has(email)) {
-      state.stats.duplicates += 1;
-      return;
-    }
     state.seen.add(email);
-    state.recipients.push(Object.assign({}, row, { email }));
+    const next = Object.assign({}, row, { email });
+    const existing = state.recipients.findIndex((item) => item.email === email);
+    if (existing >= 0) {
+      if (replaceExisting) state.recipients[existing] = next;
+      state.stats.duplicates += 1;
+    } else {
+      state.recipients.push(next);
+    }
     Object.keys(row.fields || {}).forEach((key) => state.columns.add(key));
   });
   state.importCount = state.recipients.length;
@@ -1370,7 +1728,7 @@ function clearRecipients() {
 }
 
 function downloadSample() {
-  const csv = "Email,Name,Company,Template,Sender Name,S_Date,S_Time\nada@example.com,Ada Lovelace,Analytical,<p>Hello {Name}</p>,Ada Events,2026-10-22,09:30\ngrace@example.com,Grace Hopper,Navy,<p>Hi {Name}</p>,Navy Desk,22/10/2026,14:00\n";
+  const csv = "Receiver email,Name,Sender Name,Sender email,CC,Company,Template,S_Date,S_Time\nada@example.com,Ada Lovelace,ICTCS Conference Support,parth@gr-conferences.com,desk@gr-conferences.com,Analytical,<p>Hello {Name}</p>,2026-10-22,09:30\n";
   const blob = new Blob([csv], { type: "text/csv" });
   const link = document.createElement("a");
   link.href = URL.createObjectURL(blob);
@@ -1406,9 +1764,10 @@ async function sendCampaign(action, options) {
     throw new Error("The admin has not assigned a sending mailbox to this account yet.");
   }
   const subject = document.getElementById("subject-input").value.trim();
-  const html = document.getElementById("editor").innerHTML.trim();
-  const plain = document.getElementById("editor").innerText.trim();
-  if (!subject || !plain) throw new Error("Subject and message are required.");
+  const html = composerHtml().trim();
+  const editor = document.getElementById("editor");
+  const plain = (activeTemplate() && activeTemplate().rawHtml) ? plainFromHtml(html) : (editor ? editor.innerText.trim() : "");
+  if (!subject || (!plain && !html.includes("<"))) throw new Error("Subject and message are required.");
   ["cc-input", "bcc-input"].forEach((id) => {
     document.getElementById(id).value.split(/[\s,;]+/).map((part) => part.trim()).filter(Boolean).forEach((part) => {
       if (!EMAIL_RE.test(normalizeEmail(part))) throw new Error("Invalid copy address: " + part);
@@ -1423,19 +1782,29 @@ async function sendCampaign(action, options) {
   const zone = document.getElementById("schedule-zone").value || "UTC";
   if (scheduled) {
     const found = sheetTimes(rows, zone);
-    if (!found.length) throw new Error("The sheet needs S_Date and S_Time. Use 2026-10-22 and 09:30, or 22/10/2026 and 09:30.");
-    found.sort((left, right) => left.unix - right.unix);
-    scheduleAt = found[0].unix;
-    const dateInput = document.getElementById("schedule-date");
-    const timeInput = document.getElementById("schedule-time");
-    if (dateInput) dateInput.value = found[0].date;
-    if (timeInput) timeInput.value = found[0].time;
-    const distinct = new Set(found.map((item) => `${item.date} ${item.time}`)).size;
-    const missing = rows.length - found.length;
-    scheduleNote = distinct > 1
-      ? `First row sends ${found[0].date} ${found[0].time}. ${distinct} different S_Date and S_Time values; each row waits for its own.`
-      : `S_Date ${found[0].date} and S_Time ${found[0].time} from the sheet.`;
-    if (missing) scheduleNote += ` ${missing} rows have no sheet time and use that first time.`;
+    const fromSheet = Boolean(options && options.fromSheet) && found.length > 0;
+    if (fromSheet) {
+      found.sort((left, right) => left.unix - right.unix);
+      scheduleAt = found[0].unix;
+      const distinct = new Set(found.map((item) => `${item.date} ${item.time}`)).size;
+      const missing = rows.length - found.length;
+      scheduleNote = distinct > 1
+        ? `First row sends ${found[0].date} ${found[0].time}. ${distinct} different S_Date and S_Time values; each row waits for its own.`
+        : `S_Date ${found[0].date} and S_Time ${found[0].time} from the sheet.`;
+      if (missing) scheduleNote += ` ${missing} rows have no sheet time and use that first time.`;
+    } else {
+      ensureScheduleClock();
+      const date = (document.getElementById("schedule-date") || {}).value || "";
+      const time = (document.getElementById("schedule-time") || {}).value || "";
+      if (!date || !time) throw new Error("Choose the date and time sending should start. Use 07:00 for 7:00 in the morning.");
+      scheduleAt = zonedToUnix(date, time, zone);
+      if (!scheduleAt || scheduleAt <= Math.floor(Date.now() / 1000) + 20) {
+        throw new Error("That time has already passed. Pick a later time, such as 07:00 tomorrow morning.");
+      }
+      const later = found.filter((item) => item.unix > scheduleAt + 30).length;
+      scheduleNote = `Sending starts ${date} ${time} (${zone}), then one by one. A Gmail mailbox waits at least 90 seconds between its own emails. Leave Start-Mailing-Suite.bat open.`;
+      if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait for that time.`;
+    }
   }
   const pace = {
     delay_min_seconds: Number(document.getElementById("delay-min").value),
@@ -1450,9 +1819,17 @@ async function sendCampaign(action, options) {
     : (senders.length > 1
       ? `${senders.length} assigned mailboxes will send in parallel. Each Gmail mailbox waits at least 90 seconds between its own emails.`
       : `One-by-one SMTP from ${sender && (sender.display_name || sender.email) || "the assigned mailbox"}. Gmail policy applies.`);
+  const sheetAccounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
+  const sheetNames = [...new Set(rows.map((row) => rowSenderName(row)).filter(Boolean))];
+  const sheetCopies = [...new Set(rows.map((row) => looseField(row, CC_KEYS)).filter(Boolean))];
+  const sheetNote = [
+    sheetAccounts.length ? `Sheet sends from ${sheetAccounts.slice(0, 3).join(", ")}.` : "No Account Email column, so the From box chooses the mailbox.",
+    sheetNames.length ? `The name on the message is ${sheetNames.slice(0, 3).join(", ")}.` : "",
+    sheetCopies.length ? `CC ${sheetCopies.slice(0, 3).join(", ")}.` : "",
+  ].filter(Boolean).join(" ");
   const agreed = await askConfirm(
     scheduled ? (mode === "draft" ? "Schedule SMTP Draft?" : "Schedule SMTP Send?") : (mode === "draft" ? "SMTP Draft all emails?" : "Start SMTP Send?"),
-    `${rows.length.toLocaleString()} recipients. ${mailboxLine} ${scheduleNote} Delay ${pace.delay_min_seconds}-${pace.delay_max_seconds}s, batches of ${pace.batch_size}.${sender && sender.live === false ? " A mailbox with no password stays in simulation." : ""}`,
+    `${rows.length.toLocaleString()} recipients. ${mailboxLine} ${sheetNote} ${scheduleNote} Delay ${pace.delay_min_seconds}-${pace.delay_max_seconds}s, batches of ${pace.batch_size}.${sender && sender.live === false ? " A mailbox with no password stays in simulation." : ""}`,
     scheduled ? "Schedule" : (mode === "draft" ? "Draft" : "Send")
   );
   if (!agreed) return;
@@ -1485,7 +1862,7 @@ async function sendCampaign(action, options) {
       });
       alreadySent += added.already_sent || 0;
     }
-    if (alreadySent) toast(`${alreadySent.toLocaleString()} people were already emailed, so they were not queued again.`, "warn");
+    if (alreadySent) toast(`${alreadySent.toLocaleString()} repeated addresses in this list were kept once.`, "warn");
     for (const file of state.sourceFiles) {
       const response = await fetch(apiBase() + `/api/campaigns/${id}/source`, {
         method: "POST",
@@ -1554,7 +1931,8 @@ async function toggleSchedule() {
   if (fields) fields.classList.remove("hidden");
   if (details) details.open = true;
   captureTemplate();
-  await sendCampaign("send", { schedule: true });
+  ensureScheduleClock();
+  await sendCampaign("send", { schedule: true, fromSheet: true });
 }
 
 async function downloadReport(id) {
@@ -1609,8 +1987,10 @@ async function refreshMaster() {
 
 function campaignSignature() {
   const ledger = state.ledger || {};
+  const catalog = (state.catalog || []).map((item) => [item.id, item.status, item.email]).join("|");
   return JSON.stringify(state.campaigns.map((item) => [item.id, item.status, item.sent_count, item.failed_count, item.bounced_count, item.skipped_count, item.hold_reason, item.last_error, item.drive_report_url]))
-    + [ledger.mine_total, ledger.sent_total, ledger.unique_people, ledger.used_day, ledger.company_remaining].join(":");
+    + [ledger.mine_total, ledger.sent_total, ledger.unique_people, ledger.used_day, ledger.company_remaining, ledger.total_limit, ledger.total_sent, ledger.total_left].join(":")
+    + catalog;
 }
 
 async function refreshUi() {
@@ -1642,7 +2022,7 @@ async function tick() {
     const signature = campaignSignature() + (state.monitor ? state.monitor.campaigns.length : "");
     const idle = Date.now() - state.lastInteract > 2500;
     const typing = document.activeElement && document.activeElement.closest("input, textarea, select");
-    if ((signature !== before || moved) && idle && !typing && !deskDirty() && ["home", "campaigns", "history", "master"].includes(state.view)) {
+    if ((signature !== before || moved) && idle && !typing && !deskDirty() && !assignDirty() && ["home", "campaigns", "history", "master"].includes(state.view)) {
       state.campSig = signature;
       renderView();
     } else state.campSig = signature;
@@ -1671,7 +2051,7 @@ async function enterApp() {
     try { restoreComposer(JSON.parse(local)); } catch (error) { /* ignore broken draft */ }
   }
   const chosen = activeTemplate();
-  if (chosen && (chosen.subject || chosen.html)) applyTemplate(chosen);
+  if (chosen && (chosen.subject || chosen.html || chosen.rawHtml)) applyTemplate(chosen);
   else captureTemplate();
   renderTemplates();
   paintScheduleButton();
@@ -1733,6 +2113,120 @@ function tagTrackedUrl(url, tracking) {
   }
 }
 
+function savedGa4Builder() {
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem("parth.ga4builder") || "{}"); } catch (error) { saved = {}; }
+  const tracking = state.tracking || {};
+  return {
+    url: saved.url || "",
+    text: saved.text || "",
+    source: saved.source || tracking.source || "parth-mailing",
+    medium: saved.medium || tracking.medium || "email",
+    campaign: saved.campaign || tracking.campaign || "",
+    term: saved.term || tracking.term || "",
+    content: saved.content || tracking.content || "",
+  };
+}
+
+function readGa4Builder() {
+  const value = (id) => ((document.getElementById(id) || {}).value || "").trim();
+  return {
+    url: value("ga4-url"),
+    text: value("ga4-text"),
+    source: value("ga4-b-source"),
+    medium: value("ga4-b-medium") || "email",
+    campaign: value("ga4-b-campaign"),
+    term: value("ga4-b-term"),
+    content: value("ga4-b-content"),
+  };
+}
+
+function buildGa4Link(values) {
+  return tagTrackedUrl(values.url, {
+    enabled: true,
+    source: values.source,
+    medium: values.medium || "email",
+    campaign: values.campaign,
+    term: values.term,
+    content: values.content,
+  });
+}
+
+function paintGa4Preview() {
+  const built = document.getElementById("ga4-built");
+  if (!built) return "";
+  const values = readGa4Builder();
+  if (!/^https?:\/\//i.test(values.url)) {
+    built.value = "";
+    return "";
+  }
+  const link = buildGa4Link(values);
+  built.value = link === values.url && !values.campaign && !values.source ? "" : link;
+  return built.value;
+}
+
+function openGa4Builder() {
+  const saved = savedGa4Builder();
+  setComposerMode(document.getElementById("composer").classList.contains("is-max") ? "max" : "dock");
+  openModal(`
+    <h3>GA4 tracker</h3>
+    <p>Build a link, then insert it in the message. GA4 shows the visit under Reports, Acquisition, Traffic acquisition. The website already needs its GA4 tag.</p>
+    <label>Website address<input id="ga4-url" class="input" placeholder="https://example.com/register" value="${esc(saved.url)}"></label>
+    <label>Link text<input id="ga4-text" class="input" placeholder="Register now" value="${esc(saved.text)}"></label>
+    <div class="config-grid">
+      <label>Campaign<input id="ga4-b-campaign" class="input" placeholder="october-invite" value="${esc(saved.campaign)}"></label>
+      <label>Source<input id="ga4-b-source" class="input" placeholder="parth-mailing" value="${esc(saved.source)}"></label>
+      <label>Medium<input id="ga4-b-medium" class="input" placeholder="email" value="${esc(saved.medium)}"></label>
+      <label>Content<input id="ga4-b-content" class="input" placeholder="header-button" value="${esc(saved.content)}"></label>
+    </div>
+    <label>Term<input id="ga4-b-term" class="input" placeholder="optional" value="${esc(saved.term)}"></label>
+    <label>Tracked link<input id="ga4-built" class="input" readonly></label>
+    <div class="row">
+      <button class="btn btn-ghost" type="button" data-action="modal-cancel">Cancel</button>
+      <button class="btn btn-ghost" type="button" data-action="ga4-copy">Copy link</button>
+      <button class="btn btn-primary" type="button" data-action="ga4-insert">Insert in composer</button>
+    </div>`, true);
+  ["ga4-url", "ga4-text", "ga4-b-campaign", "ga4-b-source", "ga4-b-medium", "ga4-b-content", "ga4-b-term"].forEach((id) => {
+    const field = document.getElementById(id);
+    if (field) field.addEventListener("input", paintGa4Preview);
+  });
+  paintGa4Preview();
+  const url = document.getElementById("ga4-url");
+  if (url) url.focus();
+}
+
+function rememberGa4Builder(values) {
+  localStorage.setItem("parth.ga4builder", JSON.stringify(values));
+}
+
+function insertBuiltLink(url, text) {
+  const label = text || url;
+  const anchor = `<a href="${esc(url)}">${esc(label)}</a>`;
+  const current = activeTemplate();
+  if (current && current.rawHtml) {
+    if (/<\/body>/i.test(current.rawHtml)) current.rawHtml = current.rawHtml.replace(/<\/body>/i, `${anchor}</body>`);
+    else current.rawHtml += anchor;
+    applyTemplate(current);
+    persistTemplates();
+    return;
+  }
+  const editor = document.getElementById("editor");
+  if (!editor) return;
+  editor.focus();
+  document.execCommand("insertHTML", false, anchor);
+  captureTemplate();
+}
+
+function readyGa4Link() {
+  const values = readGa4Builder();
+  if (!/^https?:\/\//i.test(values.url)) throw new Error("Enter a website address that starts with https://");
+  if (!values.campaign) throw new Error("Name the campaign so GA4 can group these visits.");
+  const link = buildGa4Link(values);
+  if (!link.includes("utm_")) throw new Error("Add a source, medium, or campaign so the link can be tracked.");
+  rememberGa4Builder(values);
+  return { values, link };
+}
+
 function tagHtmlLinks(html, tracking) {
   const settings = tracking || readTrackingForm();
   settings.enabled = true;
@@ -1750,18 +2244,22 @@ function paintFullPreview() {
   const row = rows[index];
   if (!row) {
     if (meta) meta.textContent = "Import Excel, then open Preview.";
-    frame.srcdoc = "<p style='font-family:sans-serif;padding:24px'>No recipients yet.</p>";
+    armExternalLinks(frame);
+    frame.srcdoc = externalPreviewHtml("<p style='font-family:sans-serif;padding:24px'>No recipients yet.</p>");
     return;
   }
   const editor = document.getElementById("editor");
   const subjectField = document.getElementById("subject-input");
   const templateField = fieldOf(row, "Template") || row.template || "";
-  const source = templateField && templateField.includes("<") ? templateField : (editor ? editor.innerHTML : "");
-  const html = tagHtmlLinks(applyVars(source, row), Object.assign({}, state.tracking, { enabled: !!state.tracking.enabled }));
+  const source = templateField && templateField.includes("<") ? templateField : composerHtml();
+  const html = tagHtmlLinks(linkUnsubscribeHtml(applyVars(source, row), row.email), Object.assign({}, state.tracking, { enabled: !!state.tracking.enabled }));
   const subject = applyVars((subjectField && subjectField.value) || "", row);
-  const fromName = fieldOf(row, "Sender Name") || row.sender_name || "Assigned mailbox";
-  if (meta) meta.textContent = `From: ${fromName} · Subject: ${subject || "(no subject)"} · ${row.email}`;
-  frame.srcdoc = html || "<p style='font-family:sans-serif;padding:24px'>Open Composer and write a message.</p>";
+  const fromName = rowSenderName(row) || "Assigned mailbox";
+  const fromMail = rowSendingAccount(row) || state.sheetMailbox || "";
+  const copy = looseField(row, CC_KEYS);
+  if (meta) meta.textContent = `Sender email: ${fromMail || "empty"} · Receiver email: ${row.email || "empty"} · From name: ${fromName} · Subject: ${subject || "(no subject)"}${copy ? " · CC: " + copy : ""}`;
+  armExternalLinks(frame);
+  frame.srcdoc = externalPreviewHtml(html || "<p style='font-family:sans-serif;padding:24px'>Open Composer and write a message.</p>");
 }
 
 function maskAddress(value) {
@@ -2162,14 +2660,18 @@ const actions = {
     }
   },
   async "assign-sender"(el) {
-    const select = document.querySelector(`[data-assign-select="${CSS.escape(el.dataset.email)}"]`) || document.querySelector(`[data-assign-select="${el.dataset.email}"]`);
-    const senderId = select ? select.value : "";
-    if (!senderId) throw new Error("Pick a sending mailbox.");
-    await api("/api/master/senders/assign", { method: "POST", body: JSON.stringify({ email: el.dataset.email, sender_id: senderId }) });
+    const email = el.dataset.email;
+    const root = el.closest(".assign-card") || document;
+    const boxes = [...root.querySelectorAll(`[data-assign-box="${CSS.escape(email)}"]`)];
+    const senderIds = boxes.filter((box) => box.checked).map((box) => box.value);
+    await api("/api/master/senders/assign", {
+      method: "POST",
+      body: JSON.stringify({ email, sender_ids: senderIds, replace: true }),
+    });
     await refreshMaster();
     await refreshCatalog();
     renderView();
-    toast("Mailbox assigned");
+    toast(senderIds.length ? `${senderIds.length} mailbox${senderIds.length === 1 ? "" : "es"} saved` : "Mailboxes removed");
   },
   "toggle-theme"() {
     applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
@@ -2242,6 +2744,25 @@ const actions = {
     document.execCommand("createLink", false, url);
   },
   "insert-var"(el) { insertToken(el.dataset.token); },
+  "open-ga4"() { openGa4Builder(); },
+  "insert-unsubscribe"() {
+    insertBuiltLink(unsubscribeHref(), "click here to unsubscribe");
+    toast("Unsubscribe link inserted. The reader’s email app opens a message to conference.ictcs@gmail.com.");
+  },
+  async "ga4-copy"() {
+    const { link } = readyGa4Link();
+    const built = document.getElementById("ga4-built");
+    if (built) built.value = link;
+    await navigator.clipboard.writeText(link);
+    toast("Tracked link copied");
+  },
+  "ga4-insert"() {
+    const { values, link } = readyGa4Link();
+    insertBuiltLink(link, values.text);
+    finishModal(true);
+    setComposerMode("max");
+    toast("Tracked link inserted");
+  },
   "toggle-cc"() { document.getElementById("cc-fields").classList.toggle("hidden"); },
   "pick-image"() { document.getElementById("image-input").click(); },
   "pick-attachment"() { document.getElementById("attach-input").click(); },
@@ -2294,6 +2815,34 @@ const actions = {
     applyTemplate(state.templates[0]);
     persistTemplates();
     renderTemplates();
+  },
+  async "template-html"() {
+    if (state.templates.length >= 30) throw new Error("30 templates is the limit. Delete one to add another.");
+    const result = await askHtmlTemplate();
+    if (!result) return;
+    captureTemplate();
+    const template = { id: templateId(), name: result.name, subject: result.subject, html: "", rawHtml: result.html };
+    state.templates.push(template);
+    state.activeTemplateId = template.id;
+    applyTemplate(template);
+    persistTemplates();
+    renderTemplates();
+    setComposerMode("max");
+    toast("HTML template added");
+  },
+  async "template-html-edit"() {
+    const current = activeTemplate();
+    if (!current || !current.rawHtml) return;
+    const result = await askHtmlTemplate(current);
+    if (!result) return;
+    current.name = result.name;
+    current.subject = result.subject;
+    current.rawHtml = result.html;
+    current.html = "";
+    applyTemplate(current);
+    persistTemplates();
+    renderTemplates();
+    toast("HTML template saved");
   },
   "send-campaign"() { return sendCampaign("send"); },
   async "request-sender"(el) {
@@ -2399,6 +2948,15 @@ const actions = {
     const input = document.getElementById("modal-input");
     finishModal(input ? input.value.trim() : "");
   },
+  "modal-html-save"() {
+    const name = ((document.getElementById("html-template-name") || {}).value || "").trim().slice(0, 40);
+    const subject = ((document.getElementById("html-template-subject") || {}).value || "").trim();
+    const html = ((document.getElementById("html-template-source") || {}).value || "").replace(/^\uFEFF/, "").trim();
+    if (!name) throw new Error("Name the HTML template.");
+    if (!html.includes("<")) throw new Error("Paste HTML, or choose an .html file.");
+    if (html.length > 400000) throw new Error("That HTML file is too large to keep in this browser.");
+    finishModal({ name, subject, html });
+  },
 };
 
 document.addEventListener("click", async (event) => {
@@ -2426,6 +2984,15 @@ document.addEventListener("input", (event) => {
     state.recipientQuery = event.target.value;
     refreshFilter();
   }
+  if (event.target.id === "mailbox-filter") {
+    state.mailboxQuery = event.target.value;
+    renderView();
+    const box = document.getElementById("mailbox-filter");
+    if (box) {
+      box.focus();
+      box.setSelectionRange(box.value.length, box.value.length);
+    }
+  }
   if (event.target.id === "user-search") {
     state.userQuery = event.target.value.trim();
     renderView();
@@ -2449,7 +3016,11 @@ document.addEventListener("change", async (event) => {
     try { await importFiles(files); } catch (error) { toast(error.message, "danger"); }
   }
   if (event.target.id === "schedule-on") {
-    document.getElementById("schedule-fields").classList.toggle("hidden", !event.target.checked);
+    const on = event.target.checked;
+    document.getElementById("schedule-fields").classList.toggle("hidden", !on);
+    const hint = document.getElementById("schedule-hint");
+    if (hint) hint.classList.toggle("hidden", !on);
+    if (on) ensureScheduleClock();
     paintSendLabel();
   }
   if (event.target.id === "font-name") {

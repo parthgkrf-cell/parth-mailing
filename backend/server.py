@@ -53,8 +53,9 @@ WORKSPACE_DAILY_CAP = 1800
 GMAIL_CONSUMER_GAP = 90.0
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.I)
 REPORT_HEADERS = [
-    "Email", "First Name", "Last Name", "Company", "Custom1",
-    "Status", "Timestamp (UTC)", "SMTP Code", "Error",
+    "Receiver email", "Sender email", "First Name", "Last Name", "Company", "Custom1",
+    "Status", "From name", "Account Email", "Sent by", "Subject",
+    "Sent time", "Timestamp (UTC)", "SMTP Code", "Error",
 ]
 
 if getattr(sys, "frozen", False):
@@ -259,7 +260,9 @@ def init_db():
                 smtp_code TEXT DEFAULT '',
                 sent_at REAL,
                 sender_id TEXT DEFAULT '',
-                ready_at REAL
+                ready_at REAL,
+                from_email TEXT DEFAULT '',
+                from_name TEXT DEFAULT ''
             );
             CREATE INDEX IF NOT EXISTS idx_rec_camp ON recipients(campaign_id, status);
             CREATE INDEX IF NOT EXISTS idx_rec_sent ON recipients(status, sent_at);
@@ -317,6 +320,10 @@ def init_db():
             conn.execute("ALTER TABLE recipients ADD COLUMN sender_id TEXT DEFAULT ''")
         if "ready_at" not in rec_cols:
             conn.execute("ALTER TABLE recipients ADD COLUMN ready_at REAL")
+        if "from_email" not in rec_cols:
+            conn.execute("ALTER TABLE recipients ADD COLUMN from_email TEXT DEFAULT ''")
+        if "from_name" not in rec_cols:
+            conn.execute("ALTER TABLE recipients ADD COLUMN from_name TEXT DEFAULT ''")
         existing = conn.execute("SELECT 1 FROM app_settings WHERE key='desk_ui'").fetchone()
         if not existing:
             conn.execute(
@@ -487,6 +494,54 @@ def count_sent(conn, owner=None, since=None):
     return conn.execute(sql, args).fetchone()["n"]
 
 
+def mailbox_quota(conn, user):
+    """Daily room across the mailboxes this login can send from.
+
+    Gmail is 400 and Google Workspace is 1,800 unless a lower cap is saved
+    on that mailbox. Sent and left use the last 24 hours for each mailbox.
+    """
+    cutoff = time.time() - 86400
+    used_by_email = {}
+    for row in conn.execute(
+        "SELECT sender_email, COUNT(*) AS n FROM pace WHERE sent_at>=? GROUP BY sender_email",
+        (cutoff,),
+    ):
+        used_by_email[normalize_email(row["sender_email"])] = int(row["n"])
+    boxes = []
+    seen = set()
+    total_limit = total_sent = total_left = 0
+    for sender in configured_senders():
+        status = grant_status(conn, user["email"], sender["id"], user["role"])
+        if user["role"] != "ROLE_MASTER" and status != "approved":
+            continue
+        address = normalize_email(sender.get("user") or sender.get("email") or "")
+        if not address or address in seen:
+            continue
+        seen.add(address)
+        cap = mailbox_daily_cap(sender)
+        sent = int(used_by_email.get(address, 0))
+        left = max(0, cap - sent)
+        domain = address.split("@", 1)[1] if "@" in address else ""
+        kind = "gmail" if domain in ("gmail.com", "googlemail.com") else "workspace"
+        boxes.append({
+            "id": sender["id"],
+            "email": sender.get("email") or address,
+            "cap": cap,
+            "sent": sent,
+            "left": left,
+            "kind": kind,
+        })
+        total_limit += cap
+        total_sent += sent
+        total_left += left
+    return {
+        "total_limit": total_limit,
+        "total_sent": total_sent,
+        "total_left": total_left,
+        "mailbox_quota": boxes,
+    }
+
+
 def ledger_snapshot(user):
     now = time.time()
     ui = load_desk_ui()
@@ -500,6 +555,7 @@ def ledger_snapshot(user):
         sent_total = count_sent(conn)
         sent_today = count_sent(conn, since=now - 86400)
         unique_people = conn.execute("SELECT COUNT(*) AS n FROM sent_people").fetchone()["n"]
+        quota = mailbox_quota(conn, user)
     company_cap = int(ui.get("global_daily_cap") or 0)
     return {
         "sent_total": sent_total,
@@ -516,6 +572,10 @@ def ledger_snapshot(user):
         "company_daily_cap": company_cap,
         "company_remaining": None if company_cap <= 0 else max(0, company_cap - sent_today),
         "block_repeat_recipients": bool(ui.get("block_repeat_recipients")),
+        "total_limit": quota["total_limit"],
+        "total_sent": quota["total_sent"],
+        "total_left": quota["total_left"],
+        "mailbox_quota": quota["mailbox_quota"],
     }
 
 
@@ -1734,8 +1794,35 @@ def account_error_is_fatal(message):
     return any(needle in lowered for needle in needles)
 
 
+UNSUBSCRIBE_ADDRESS = "conference.ictcs@gmail.com"
+
+
+def unsubscribe_href(recipient_email):
+    who = str(recipient_email or "").strip() or "this address"
+    body = urllib.parse.quote(f"Please unsubscribe {who}.")
+    return f"mailto:{UNSUBSCRIBE_ADDRESS}?subject=Unsubscribe&body={body}"
+
+
+def link_unsubscribe(value, recipient_email):
+    href = html.escape(unsubscribe_href(recipient_email), quote=True)
+    parts = re.split(r"(?is)(<a\b[^>]*>.*?</a>)", str(value or ""))
+    phrase = re.compile(r"click\s+here\s+to\s+unsubscribe", re.I)
+    linked = []
+    for part in parts:
+        if part.lower().startswith("<a"):
+            linked.append(part)
+            continue
+        linked.append(phrase.sub(lambda match: f'<a href="{href}">{match.group(0)}</a>', part))
+    return "".join(linked)
+
+
 def html_to_text(value):
-    text = re.sub(r"(?i)<br\s*/?>", "\n", str(value or ""))
+    text = re.sub(
+        r'(?is)<a\b[^>]*href=(["\'])(mailto:[^"\']+)\1[^>]*>(.*?)</a>',
+        lambda match: f"{re.sub(r'<[^>]+>', '', match.group(3))} ({html.unescape(match.group(2))})",
+        str(value or ""),
+    )
+    text = re.sub(r"(?i)<br\s*/?>", "\n", text)
     text = re.sub(r"(?i)</p>", "\n\n", text)
     text = re.sub(r"<[^>]+>", "", text)
     return html.unescape(text).strip()
@@ -1754,6 +1841,18 @@ def sanitize_html(value):
         return f"href={quote}#{quote}"
 
     return re.sub(r"(?i)href=([\"'])(.*?)\1", href_replacer, text)
+
+
+def _assign_blank(values, label, text):
+    if not str(text or "").strip():
+        return
+    wanted = label.lower().replace(" ", "")
+    for key in list(values):
+        if str(key).lower().replace(" ", "") == wanted:
+            if not str(values[key] or "").strip():
+                values[key] = text
+            return
+    values[label] = text
 
 
 def apply_variables(template, recipient, escape_values):
@@ -1775,6 +1874,17 @@ def apply_variables(template, recipient, escape_values):
         values["Name"] = values.get("FirstName") or ""
     if not any(name.lower() == "sender" for name in values):
         values["Sender"] = values.get("Sender Name") or values.get("sender_name") or ""
+    receiver = recipient["email"] or ""
+    _assign_blank(values, "Receiver email", receiver)
+    _assign_blank(values, "Reciver email", receiver)
+    sender_mail = ""
+    for key, value in values.items():
+        if norm_field_key(key) in MAILBOX_FIELD_KEYS:
+            candidate = normalize_email(value)
+            if EMAIL_RE.match(candidate):
+                sender_mail = candidate
+                break
+    _assign_blank(values, "Sender email", sender_mail)
 
     def replacer(match):
         key = match.group(1).strip()
@@ -1888,7 +1998,7 @@ def build_message(sender, recipient_email, subject, html_body, cc_list, attachme
     message["Date"] = email.utils.formatdate(localtime=True)
     domain = sender["user"].split("@", 1)[1] if "@" in sender["user"] else "localhost"
     message["Message-ID"] = email.utils.make_msgid(domain=domain)
-    message["List-Unsubscribe"] = f"<mailto:{sender['user']}?subject=unsubscribe>"
+    message["List-Unsubscribe"] = f"<mailto:{UNSUBSCRIBE_ADDRESS}?subject=Unsubscribe>"
     return message
 
 
@@ -1901,15 +2011,17 @@ def deliver(campaign, recipient, sender, limits_ignored=False):
     if template_html and ("<" in template_html or not str(source_html or "").strip()):
         source_html = template_html
     html_body = sanitize_html(apply_variables(source_html, recipient, True))
+    html_body = link_unsubscribe(html_body, recipient["email"])
     html_body = apply_email_tracking(html_body)
-    cc_raw = field_value(recipient, "Cc", "CC", "cc") or campaign["cc"] or ""
-    bcc_raw = field_value(recipient, "Bcc", "BCC", "bcc") or campaign["bcc"] or ""
+    fields = parsed_fields(recipient)
+    cc_raw = row_copy(fields, CC_FIELD_KEYS, campaign["cc"] or "")
+    bcc_raw = row_copy(fields, BCC_FIELD_KEYS, campaign["bcc"] or "")
     cc_list, cc_bad = split_address_list(cc_raw)
     bcc_list, bcc_bad = split_address_list(bcc_raw)
     if cc_bad or bcc_bad:
         bad = ", ".join(cc_bad + bcc_bad)
         return {"status": "FAILED", "code": "", "error": f"Invalid copy address: {bad}"}
-    display = field_value(recipient, "Sender Name", "From Name", "Display Name") or sender["display_name"]
+    display = row_sender_name(recipient, fields) or sender["display_name"]
     action = campaign_action(campaign)
     done_status = "DRAFTED" if action == "draft" else "SENT"
     if not live_delivery(sender):
@@ -2100,25 +2212,86 @@ def approved_senders_for(conn, user):
     return found
 
 
+def norm_field_key(value):
+    return re.sub(r"[^a-z0-9]+", "", str(value or "").lower())
+
+
+MAILBOX_FIELD_KEYS = {
+    "accountemail", "fromemail", "senderemail", "mailbox", "mailingemail",
+    "sendingemail", "fromaddress", "sendfrom", "sendusing", "sendingaccount",
+    "fromaccount", "mailfrom", "senderaccount", "frommailbox", "emailaccount",
+}
+NAME_FIELD_KEYS = {
+    "sendername", "fromname", "displayname", "senderdisplayname", "nameofsender",
+}
+CC_FIELD_KEYS = {"cc", "ccemail", "ccmail", "ccaddress", "carboncopy", "copyto", "emailcc"}
+BCC_FIELD_KEYS = {"bcc", "bccemail", "bccmail", "bccaddress", "blindcarboncopy", "blindcopy"}
+
+
+def field_by_keys(fields, keys):
+    for key, value in (fields or {}).items():
+        if norm_field_key(key) in keys and str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
+def parsed_fields(item):
+    if not isinstance(item, dict):
+        return {}
+    if isinstance(item.get("fields"), dict):
+        return item["fields"]
+    raw = item.get("fields_json")
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw or "{}")
+    except (json.JSONDecodeError, TypeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
 def row_mailbox(item, fields):
-    fields = fields or {}
-    candidates = [
-        item.get("sender") if isinstance(item, dict) else "",
-        item.get("sender_id") if isinstance(item, dict) else "",
-        fields.get("Account Email"),
-        fields.get("Mailing Email"),
-        fields.get("Mailbox"),
-        fields.get("Sender Email"),
-        fields.get("From Email"),
-        fields.get("Sender"),
-        fields.get("sender"),
-        fields.get("From"),
-    ]
+    fields = fields or parsed_fields(item)
+    found = normalize_email(field_by_keys(fields, MAILBOX_FIELD_KEYS))
+    if EMAIL_RE.match(found):
+        return found
+    candidates = []
+    if isinstance(item, dict):
+        candidates.extend([item.get("sender"), item.get("sender_id")])
+    candidates.extend([
+        (fields or {}).get("Sender"),
+        (fields or {}).get("sender"),
+        (fields or {}).get("From"),
+        (fields or {}).get("from"),
+    ])
     for value in candidates:
         email = normalize_email(value)
         if EMAIL_RE.match(email):
             return email
     return ""
+
+
+def row_sender_name(item, fields):
+    fields = fields or parsed_fields(item)
+    found = field_by_keys(fields, NAME_FIELD_KEYS)
+    if found and not EMAIL_RE.match(normalize_email(found)):
+        return found
+    if isinstance(item, dict):
+        named = str(item.get("sender_name") or "").strip()
+        if named and not EMAIL_RE.match(normalize_email(named)):
+            return named
+    for key in ("Sender", "sender", "From", "from"):
+        value = str((fields or {}).get(key) or "").strip()
+        if value and not EMAIL_RE.match(normalize_email(value)):
+            return value
+    return ""
+
+
+def row_copy(fields, keys, fallback):
+    sheet = field_by_keys(fields, keys)
+    extra = str(fallback or "").strip()
+    parts = [part for part in (sheet, extra) if part]
+    return ", ".join(parts)
 
 
 def match_row_sender(pool, item, fields):
@@ -2137,14 +2310,19 @@ def match_row_sender(pool, item, fields):
 SHEET_ID_RE = re.compile(r"/spreadsheets/d/([a-zA-Z0-9-_]+)")
 SHEET_GID_RE = re.compile(r"[?#&]gid=(\d+)")
 SHEET_HEADERS = {
-    "email": {"email", "e-mail", "email address", "emailaddress", "mail", "recipient", "recipient email", "to"},
+    "email": {
+        "email", "e-mail", "email address", "emailaddress", "mail", "recipient", "recipient email", "to",
+        "to email", "email to", "receiver", "receiver email", "receivers email", "reciver", "reciver email", "recivers email",
+    },
     "first": {"firstname", "first name", "first", "given name", "givenname", "name"},
     "last": {"lastname", "last name", "last", "surname", "family name"},
     "company": {"company", "organization", "organisation", "org", "affiliation", "institution"},
     "custom": {"custom1", "custom", "note", "tag", "segment"},
     "template": {"template", "html", "body", "message", "email body"},
-    "sender": {"sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address"},
-    "sender_name": {"sender name", "from name", "displayname", "display name", "sendername"},
+    "sender": {"sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address", "send from", "send using", "sending account", "from account", "mail from", "sender account", "from mailbox", "email account"},
+    "sender_name": {"sender name", "from name", "displayname", "display name", "sendername", "sender display name", "name of sender"},
+    "cc": {"cc", "cc email", "cc mail", "cc address", "carbon copy", "copy to", "email cc"},
+    "bcc": {"bcc", "bcc email", "bcc mail", "bcc address", "blind carbon copy", "blind copy"},
 }
 
 
@@ -2295,27 +2473,45 @@ def row_ready_unix(fields, timezone, fallback):
     time_raw = sheet_field(fields, "S_Time", "STime", "Schedule Time", "Send Time")
     if not date_raw and not time_raw:
         return fallback
-    day = parse_sheet_date(date_raw)
-    clock = parse_sheet_time(time_raw) or parse_sheet_time(date_raw)
-    if not day or not clock:
-        return "invalid"
     try:
         zone = ZoneInfo(timezone or "UTC")
     except Exception:
         zone = datetime.timezone.utc
+    day = parse_sheet_date(date_raw)
+    clock = parse_sheet_time(time_raw) or parse_sheet_time(date_raw)
+    if day and not clock and fallback:
+        try:
+            moment = datetime.datetime.fromtimestamp(float(fallback), zone)
+            clock = (moment.hour, moment.minute)
+        except (TypeError, ValueError, OSError):
+            clock = None
+    if not day or not clock:
+        return "invalid"
     local = datetime.datetime(day.year, day.month, day.day, clock[0], clock[1], tzinfo=zone)
-    return local.timestamp()
+    stamp = local.timestamp()
+    try:
+        floor = float(fallback) if fallback else 0
+    except (TypeError, ValueError):
+        floor = 0
+    if floor and stamp < floor:
+        return floor
+    return stamp
 
 
 def rows_from_sheet(matrix):
     if not matrix:
         return [], [], 0
     headers = [str(cell or "").replace("\ufeff", "").strip() for cell in matrix[0]]
+    compact_headers = {
+        name: {re.sub(r"[^a-z0-9]+", "", item) for item in names}
+        for name, names in SHEET_HEADERS.items()
+    }
     indexes = {name: -1 for name in SHEET_HEADERS}
     for index, header in enumerate(headers):
         key = header.lower()
+        compact = re.sub(r"[^a-z0-9]+", "", key)
         for name, names in SHEET_HEADERS.items():
-            if indexes[name] < 0 and key in names:
+            if indexes[name] < 0 and (key in names or (compact and compact in compact_headers[name])):
                 indexes[name] = index
                 break
     if indexes["email"] < 0:
@@ -2323,6 +2519,9 @@ def rows_from_sheet(matrix):
         best_score = 0
         width = max((len(row) for row in matrix[1:31]), default=0)
         for column in range(width):
+            label = re.sub(r"[^a-z0-9]+", "", str(headers[column] if column < len(headers) else "").lower())
+            if label and label in compact_headers["sender"]:
+                continue
             score = 0
             for row in matrix[1:31]:
                 if column < len(row) and EMAIL_RE.match(normalize_email(row[column])):
@@ -2362,10 +2561,22 @@ def rows_from_sheet(matrix):
             fields[column_letter(index)] = value
         sender = cell(indexes["sender"])
         sender_name = cell(indexes["sender_name"])
+        copy = cell(indexes["cc"]) if "cc" in indexes else ""
+        blind = cell(indexes["bcc"]) if "bcc" in indexes else ""
+        if sender and not EMAIL_RE.match(normalize_email(sender)):
+            if not sender_name:
+                sender_name = sender
+            sender = ""
+        fields["Receiver email"] = email
         if sender:
             fields["Sender"] = sender
+            fields["Sender email"] = normalize_email(sender)
         if sender_name:
             fields["Sender Name"] = sender_name
+        if copy:
+            fields["CC"] = copy
+        if blind:
+            fields["BCC"] = blind
         first = cell(indexes["first"])
         if first:
             fields.setdefault("Name", first)
@@ -2735,9 +2946,15 @@ def save_outcome(campaign, recipient, outcome, sender):
     now = time.time()
     with db() as conn:
         sent_at = now if outcome["status"] in ("SENT", "DRAFTED") else None
+        from_email = normalize_email((sender or {}).get("email") or (sender or {}).get("user") or "")
+        from_name = row_sender_name(recipient, parsed_fields(recipient)) or str((sender or {}).get("display_name") or "")
+        from_name = from_name[:200]
         conn.execute(
-            "UPDATE recipients SET status=?, error=?, smtp_code=?, sent_at=? WHERE id=?",
-            (outcome["status"], outcome.get("error") or "", outcome.get("code") or "", sent_at, recipient["id"]),
+            "UPDATE recipients SET status=?, error=?, smtp_code=?, sent_at=?, from_email=?, from_name=? WHERE id=?",
+            (
+                outcome["status"], outcome.get("error") or "", outcome.get("code") or "",
+                sent_at, from_email, from_name, recipient["id"],
+            ),
         )
         recompute_counts(conn, campaign["id"])
         if outcome["status"] == "SENT" and not outcome.get("already_recorded"):
@@ -2785,17 +3002,116 @@ def after_send_delay(campaign, sender):
     SLEEP_UNTIL[key] = time.time() + delay
 
 
-def report_rows(conn, campaign_id):
+def row_text(row, key):
+    try:
+        value = row[key]
+    except (KeyError, IndexError):
+        return ""
+    return "" if value is None else str(value)
+
+
+def recipient_fields(rec):
+    try:
+        data = json.loads(rec["fields_json"] or "{}")
+    except (json.JSONDecodeError, TypeError):
+        data = {}
+    return data if isinstance(data, dict) else {}
+
+
+def field_text(fields, *names):
+    lowered = {str(key).strip().lower(): value for key, value in fields.items()}
+    for name in names:
+        value = lowered.get(str(name).strip().lower())
+        if str(value or "").strip():
+            return str(value).strip()
+    return ""
+
+
+def sent_stamps(sent_at, zone_name):
+    if not sent_at:
+        return "", ""
+    try:
+        moment = datetime.datetime.fromtimestamp(float(sent_at), datetime.timezone.utc)
+    except (TypeError, ValueError, OSError):
+        return "", ""
+    utc_text = moment.strftime("%Y-%m-%d %H:%M:%S UTC")
+    zone_label = zone_name or "Asia/Kolkata"
+    try:
+        zone = ZoneInfo(zone_label)
+    except Exception:
+        zone = ZoneInfo("Asia/Kolkata")
+        zone_label = "Asia/Kolkata"
+    local = moment.astimezone(zone)
+    return local.strftime("%Y-%m-%d %H:%M:%S ") + zone_label, utc_text
+
+
+def report_table(conn, campaign_id):
+    camp = conn.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+    zone_name = (camp["timezone"] if camp and camp["timezone"] else "") or "Asia/Kolkata"
+    campaign_subject = (camp["subject"] if camp else "") or ""
+    owner = (camp["owner"] if camp else "") or ""
+    records = list(conn.execute("SELECT * FROM recipients WHERE campaign_id=? ORDER BY id", (campaign_id,)))
+    extra_names = []
+    seen_extra = set()
+    shown = {
+        "email", "e-mail", "first name", "firstname", "first", "last name", "lastname", "last",
+        "company", "custom1", "account email", "mailing email", "mailbox", "sender email",
+        "receiver email", "reciver email", "from email", "sender", "from", "sender name",
+        "from name", "subject", "name",
+    }
+    parsed = []
+    for rec in records:
+        fields = recipient_fields(rec)
+        parsed.append(fields)
+        if len(extra_names) >= 40:
+            continue
+        for key in fields:
+            label = str(key).strip()
+            token = label.lower()
+            if not label or token in shown or token in seen_extra:
+                continue
+            if re.fullmatch(r"[A-Za-z]{1,2}", label):
+                continue
+            seen_extra.add(token)
+            extra_names.append(label)
+            if len(extra_names) >= 40:
+                break
+    headers = REPORT_HEADERS + extra_names
     rows = []
-    for rec in conn.execute("SELECT * FROM recipients WHERE campaign_id=? ORDER BY id", (campaign_id,)):
-        stamp = ""
-        if rec["sent_at"]:
-            stamp = datetime.datetime.utcfromtimestamp(rec["sent_at"]).strftime("%Y-%m-%d %H:%M:%S")
-        rows.append([
-            rec["email"], rec["first_name"], rec["last_name"], rec["company"], rec["custom1"],
-            rec["status"], stamp, rec["smtp_code"], rec["error"],
-        ])
-    return rows
+    for rec, fields in zip(records, parsed):
+        sender = sender_by_id(row_text(rec, "sender_id"))
+        stored_from = normalize_email(row_text(rec, "from_email"))
+        from_name = row_text(rec, "from_name")
+        if not stored_from and sender:
+            stored_from = normalize_email(sender.get("email") or sender.get("user") or "")
+        if not from_name:
+            from_name = field_text(fields, "Sender Name", "From Name", "Display Name")
+        if not from_name and sender:
+            from_name = str(sender.get("display_name") or "")
+        account_email = field_by_keys(fields, MAILBOX_FIELD_KEYS) or row_mailbox({}, fields)
+        sheet_sender = normalize_email(account_email)
+        if row_text(rec, "status") in ("SENT", "DRAFTED") and stored_from:
+            sender_email = stored_from
+        else:
+            sender_email = sheet_sender or stored_from
+        if not account_email:
+            account_email = sender_email
+        receiver = normalize_email(row_text(rec, "email"))
+        if not EMAIL_RE.match(receiver):
+            receiver = normalize_email(field_by_keys(fields, {
+                "receiveremail", "reciveremail", "email", "recipientemail", "to", "toemail",
+            }))
+        local_time, utc_time = sent_stamps(rec["sent_at"], zone_name)
+        subject = field_text(fields, "Subject") or campaign_subject
+        row = [
+            receiver, sender_email, rec["first_name"], rec["last_name"], rec["company"], rec["custom1"],
+            rec["status"], from_name, account_email, owner, subject,
+            local_time, utc_time, rec["smtp_code"], rec["error"],
+        ]
+        for name in extra_names:
+            row.append(field_text(fields, name))
+        rows.append(row)
+    return headers, rows
 
 
 def write_report(campaign_id):
@@ -2803,8 +3119,8 @@ def write_report(campaign_id):
         camp = conn.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
         if not camp:
             return
-        rows = report_rows(conn, campaign_id)
-    payload = xlsx_writer.workbook_bytes(REPORT_HEADERS, rows)
+        headers, rows = report_table(conn, campaign_id)
+    payload = xlsx_writer.workbook_bytes(headers, rows)
     path = os.path.join(REPORT_DIR, f"{campaign_id}.xlsx")
     with open(path, "wb") as handle:
         handle.write(payload)
@@ -2911,31 +3227,10 @@ def process_account_send(campaign_id, sender_id):
             return
         finish_if_drained(camp["id"])
         return
-    address = normalize_email(recipient["email"])
-    held = False
-    if repeats_blocked() and campaign_action(camp) != "draft":
-        with db() as conn:
-            held = remember_sent(conn, address, camp["owner"], camp["id"], exclusive=True)
-        if not held:
-            save_outcome(camp, recipient, {
-                "status": "SKIPPED",
-                "code": "DUP",
-                "error": "Already emailed this person. A second message was not sent.",
-                "simulated": False,
-                "already_recorded": True,
-            }, sender)
-            finish_if_drained(camp["id"])
-            log(f"SKIPPED {sender['user']} -> {address} already emailed")
-            return
     try:
         outcome = deliver(camp, recipient, sender)
     except Exception as exc:
         outcome = {"status": "FAILED", "code": "", "error": str(exc)[:800], "simulated": False}
-    if outcome.get("status") not in ("SENT", "DRAFTED") and held:
-        with db() as conn:
-            release_sent(conn, address, camp["id"])
-        held = False
-    outcome["already_recorded"] = held
     save_outcome(camp, recipient, outcome, sender)
     after_send_delay(camp, sender)
     label = "SIMULATED" if outcome.get("simulated") else outcome["status"]
@@ -3521,8 +3816,8 @@ class Handler(BaseHTTPRequestHandler):
             user = self.require_user()
             with db() as conn:
                 campaign_for(conn, user, report.group(1))
-                rows = report_rows(conn, report.group(1))
-            payload = xlsx_writer.workbook_bytes(REPORT_HEADERS, rows)
+                headers, rows = report_table(conn, report.group(1))
+            payload = xlsx_writer.workbook_bytes(headers, rows)
             self.send_bytes(
                 200,
                 payload,
@@ -4209,7 +4504,6 @@ class Handler(BaseHTTPRequestHandler):
                 if found:
                     pool = [found]
             cursor = 0
-            draft_job = campaign_action(camp) == "draft"
             if replace:
                 conn.execute("DELETE FROM recipients WHERE campaign_id=?", (campaign_id,))
             seen = {
@@ -4221,7 +4515,6 @@ class Handler(BaseHTTPRequestHandler):
             invalid = 0
             duplicates = 0
             already_sent = 0
-            block_repeats = repeats_blocked(conn)
             for item in rows:
                 if not isinstance(item, dict):
                     invalid += 1
@@ -4256,11 +4549,6 @@ class Handler(BaseHTTPRequestHandler):
                 status = "QUEUED"
                 error = ""
                 code = ""
-                if (not draft_job) and block_repeats and conn.execute("SELECT 1 FROM sent_people WHERE email=?", (email,)).fetchone():
-                    status = "SKIPPED"
-                    error = "Already emailed this person. A second message was not sent."
-                    code = "DUP"
-                    already_sent += 1
                 matched = match_row_sender(pool, item, trimmed) if pool else None
                 mailbox = row_mailbox(item, trimmed)
                 if mailbox and not matched and status == "QUEUED":
@@ -4275,6 +4563,18 @@ class Handler(BaseHTTPRequestHandler):
                     cursor += 1
                 else:
                     assigned = camp["sender_id"] or ""
+                planned_from = normalize_email(row_mailbox(item, trimmed))
+                chosen = matched or (sender_by_id(assigned) if assigned else None)
+                if not planned_from and chosen:
+                    planned_from = normalize_email(chosen.get("email") or chosen.get("user") or "")
+                planned_name = row_sender_name(item, trimmed)
+                if not planned_name and chosen:
+                    planned_name = str(chosen.get("display_name") or "")
+                planned_name = planned_name[:200]
+                if email and not field_by_keys(trimmed, {"receiveremail", "reciveremail"}):
+                    trimmed["Receiver email"] = email
+                if planned_from and not field_by_keys(trimmed, {"senderemail"}):
+                    trimmed["Sender email"] = planned_from
                 ready_at = None
                 if camp["schedule_at"]:
                     ready = row_ready_unix(trimmed, camp["timezone"] or "UTC", camp["schedule_at"])
@@ -4297,12 +4597,14 @@ class Handler(BaseHTTPRequestHandler):
                     code,
                     assigned,
                     ready_at,
+                    planned_from,
+                    planned_name,
                 ))
             conn.executemany(
                 """
                 INSERT INTO recipients (
-                    campaign_id, email, first_name, last_name, company, custom1, fields_json, status, error, smtp_code, sender_id, ready_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    campaign_id, email, first_name, last_name, company, custom1, fields_json, status, error, smtp_code, sender_id, ready_at, from_email, from_name
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 prepared,
             )
@@ -4363,7 +4665,11 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()["n"]
             if queued <= 0:
                 if skipped:
-                    raise ApiError("Everyone on this list was already emailed. No second message was queued.")
+                    sample = conn.execute(
+                        "SELECT error FROM recipients WHERE campaign_id=? AND status='SKIPPED' AND error!='' LIMIT 1",
+                        (campaign_id,),
+                    ).fetchone()
+                    raise ApiError((sample["error"] if sample and sample["error"] else "No one on this list can be sent."))
                 raise ApiError("Add at least one recipient.")
             if queued > limits["max_batch"]:
                 raise ApiError(f"This account can send at most {limits['max_batch']} new recipients in one campaign.")
@@ -4559,16 +4865,16 @@ class Handler(BaseHTTPRequestHandler):
         config["senders"] = saved
         for item in saved:
             if normalize_email(item.get("email")) == ADMIN_EMAIL and len(item.get("password") or "") == 16:
-                master = dict(config.get("master_smtp") or {})
-                master.update({
+                smtp_master = dict(config.get("master_smtp") or {})
+                smtp_master.update({
                     "host": item.get("host") or "smtp.gmail.com",
                     "port": item.get("port") or 465,
                     "secure": item.get("secure") or "ssl",
                     "user": ADMIN_EMAIL,
                     "password": item["password"],
-                    "from_name": item.get("display_name") or master.get("from_name") or "Parth Mailing",
+                    "from_name": item.get("display_name") or smtp_master.get("from_name") or "Parth Mailing",
                 })
-                config["master_smtp"] = master
+                config["master_smtp"] = smtp_master
         for item in saved:
             remember_otp_sender(config, item)
         write_config(config)
@@ -4596,25 +4902,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def assign_sender(self, master, data):
         email = normalize_email(data.get("email"))
-        sender = sender_by_id(str(data.get("sender_id") or ""))
         if not allowed_email(email):
             raise ApiError("That user email is not allowed.")
-        if not sender:
-            raise ApiError("Sender not found.")
+        raw_ids = data.get("sender_ids")
+        replace = False
+        wanted = []
+        if isinstance(raw_ids, list):
+            replace = bool(data.get("replace"))
+            for item in raw_ids:
+                sender = sender_by_id(str(item or ""))
+                if sender and sender["id"] not in wanted:
+                    wanted.append(sender["id"])
+        else:
+            sender = sender_by_id(str(data.get("sender_id") or ""))
+            if not sender:
+                raise ApiError("Sender not found.")
+            wanted.append(sender["id"])
+        if not wanted and not replace:
+            raise ApiError("Pick at least one mailing account.")
         now = time.time()
+        labels = []
         with db() as conn:
             ensure_user(conn, email)
-            conn.execute(
-                """
-                INSERT INTO grants (email, sender_id, status, limits_json, requested_at, decided_at)
-                VALUES (?, ?, 'approved', NULL, ?, ?)
-                ON CONFLICT(email, sender_id) DO UPDATE SET
-                    status='approved', decided_at=excluded.decided_at
-                """,
-                (email, sender["id"], now, now),
-            )
-            add_audit(conn, master["email"], "sender_assigned", f"{email} -> {sender.get('email') or sender['id']}")
-        self.send_json(200, {"ok": True, "status": "approved"})
+            for sender_id in wanted:
+                conn.execute(
+                    """
+                    INSERT INTO grants (email, sender_id, status, limits_json, requested_at, decided_at)
+                    VALUES (?, ?, 'approved', NULL, ?, ?)
+                    ON CONFLICT(email, sender_id) DO UPDATE SET
+                        status='approved', decided_at=excluded.decided_at
+                    """,
+                    (email, sender_id, now, now),
+                )
+                sender = sender_by_id(sender_id)
+                labels.append((sender or {}).get("email") or sender_id)
+            if replace:
+                if wanted:
+                    marks = ",".join("?" for _ in wanted)
+                    conn.execute(
+                        f"DELETE FROM grants WHERE email=? AND status='approved' AND sender_id NOT IN ({marks})",
+                        (email, *wanted),
+                    )
+                else:
+                    conn.execute("DELETE FROM grants WHERE email=? AND status='approved'", (email,))
+            add_audit(conn, master["email"], "sender_assigned", f"{email} -> {', '.join(labels) or 'none'}")
+        self.send_json(200, {"ok": True, "status": "approved", "sender_ids": wanted})
 
     def save_ga4(self, user, data):
         tracking = save_email_tracking(data.get("tracking") if isinstance(data.get("tracking"), dict) else data)

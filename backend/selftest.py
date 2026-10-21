@@ -258,22 +258,22 @@ def main():
     status, repeat_rows = request("POST", f"/api/campaigns/{repeat_id}/recipients", {
         "rows": [{"email": ada}, {"email": fresh}],
     }, token=user_token)
-    expect(repeat_rows.get("already_sent") == 1 and repeat_rows.get("added") == 2, repeat_rows)
+    expect(repeat_rows.get("already_sent") == 0 and repeat_rows.get("added") == 2, repeat_rows)
     status, repeat_start = request("POST", f"/api/campaigns/{repeat_id}/start", {}, token=user_token)
     expect(status == 200, repeat_start)
     repeat_done = wait_campaign(user_token, repeat_id, {"complete"}, 20)
-    expect(repeat_done["sent_count"] == 1 and repeat_done["skipped_count"] == 1, repeat_done)
+    expect(repeat_done["sent_count"] == 2 and repeat_done["skipped_count"] == 0, repeat_done)
 
     status, master_repeat = request("POST", "/api/campaigns", {
-        "sender_id": "info", "subject": "Other account", "html": "<p>No</p>",
+        "sender_id": "info", "subject": "Other account", "html": "<p>Again</p>",
         "pace": {"delay_min_seconds": 0, "delay_max_seconds": 0, "batch_size": 5, "batch_pause_minutes": 0},
     }, token=master_token)
     expect(status == 200, master_repeat)
     other_id = master_repeat["campaign"]["id"]
-    status, other_rows = request("POST", f"/api/campaigns/{other_id}/recipients", {"rows": [{"email": ada}]}, token=master_token)
-    expect(other_rows.get("already_sent") == 1, other_rows)
+    status, other_rows = request("POST", f"/api/campaigns/{other_id}/recipients", {"rows": [{"email": ada}, {"email": ada}]}, token=master_token)
+    expect(other_rows.get("duplicates") == 1 and other_rows.get("added") == 1, other_rows)
     status, other_start = request("POST", f"/api/campaigns/{other_id}/start", {}, token=master_token)
-    expect(status == 400 and "already emailed" in other_start.get("error", ""), other_start)
+    expect(status == 200, other_start)
 
     status, ledger_now = request("GET", "/api/ledger", token=master_token)
     used_today = ledger_now["ledger"]["sent_today"]

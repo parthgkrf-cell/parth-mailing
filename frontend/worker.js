@@ -12,14 +12,16 @@ try {
 
 const EMAIL_RE = /^[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}$/i;
 const HEADER_SETS = {
-  email: new Set(["email", "e-mail", "email address", "emailaddress", "mail", "recipient", "recipient email", "recipientemail", "to"]),
+  email: new Set(["email", "e-mail", "email address", "emailaddress", "mail", "recipient", "recipient email", "recipientemail", "to", "to email", "email to", "receiver", "receiver email", "receivers email", "reciver", "reciver email", "recivers email"]),
   first: new Set(["firstname", "first name", "first", "given name", "givenname", "name"]),
   last: new Set(["lastname", "last name", "last", "surname", "family name", "familyname"]),
   company: new Set(["company", "organization", "organisation", "org", "affiliation", "institution"]),
   custom: new Set(["custom1", "custom", "note", "tag", "segment"]),
   template: new Set(["template", "html", "body", "message", "email body", "emailbody"]),
-  sender: new Set(["sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address"]),
-  sender_name: new Set(["sender name", "from name", "displayname", "display name", "sendername"]),
+  sender: new Set(["sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address", "send from", "send using", "sending account", "from account", "mail from", "sender account", "from mailbox", "email account"]),
+  sender_name: new Set(["sender name", "from name", "displayname", "display name", "sendername", "sender display name", "name of sender"]),
+  cc: new Set(["cc", "cc email", "cc mail", "cc address", "carbon copy", "copy to", "email cc"]),
+  bcc: new Set(["bcc", "bcc email", "bcc mail", "bcc address", "blind carbon copy", "blind copy"]),
 };
 
 function normHeader(value) {
@@ -39,28 +41,42 @@ function cell(row, index) {
   return value == null ? "" : String(value).trim().slice(0, 5000);
 }
 
+function headerHit(name, set) {
+  if (set.has(name)) return true;
+  const compact = name.replace(/[^a-z0-9]+/g, "");
+  if (!compact) return false;
+  for (const item of set) {
+    if (item.replace(/[^a-z0-9]+/g, "") === compact) return true;
+  }
+  return false;
+}
+
 function buildMapper(headers) {
-  const mapper = { email: -1, first: -1, last: -1, company: -1, custom: -1, template: -1, sender: -1, sender_name: -1, fields: [] };
+  const mapper = { email: -1, first: -1, last: -1, company: -1, custom: -1, template: -1, sender: -1, sender_name: -1, cc: -1, bcc: -1, fields: [] };
   headers.forEach((header, index) => {
     const name = normHeader(header);
     if (!name) return;
-    if (mapper.email < 0 && HEADER_SETS.email.has(name)) mapper.email = index;
-    else if (mapper.first < 0 && HEADER_SETS.first.has(name)) mapper.first = index;
-    else if (mapper.last < 0 && HEADER_SETS.last.has(name)) mapper.last = index;
-    else if (mapper.company < 0 && HEADER_SETS.company.has(name)) mapper.company = index;
-    else if (mapper.custom < 0 && HEADER_SETS.custom.has(name)) mapper.custom = index;
-    else if (mapper.template < 0 && HEADER_SETS.template.has(name)) mapper.template = index;
-    else if (mapper.sender_name < 0 && HEADER_SETS.sender_name.has(name)) mapper.sender_name = index;
-    else if (mapper.sender < 0 && HEADER_SETS.sender.has(name)) mapper.sender = index;
+    if (mapper.email < 0 && headerHit(name, HEADER_SETS.email)) mapper.email = index;
+    else if (mapper.first < 0 && headerHit(name, HEADER_SETS.first)) mapper.first = index;
+    else if (mapper.last < 0 && headerHit(name, HEADER_SETS.last)) mapper.last = index;
+    else if (mapper.company < 0 && headerHit(name, HEADER_SETS.company)) mapper.company = index;
+    else if (mapper.custom < 0 && headerHit(name, HEADER_SETS.custom)) mapper.custom = index;
+    else if (mapper.template < 0 && headerHit(name, HEADER_SETS.template)) mapper.template = index;
+    else if (mapper.sender_name < 0 && headerHit(name, HEADER_SETS.sender_name)) mapper.sender_name = index;
+    else if (mapper.cc < 0 && headerHit(name, HEADER_SETS.cc)) mapper.cc = index;
+    else if (mapper.bcc < 0 && headerHit(name, HEADER_SETS.bcc)) mapper.bcc = index;
+    else if (mapper.sender < 0 && headerHit(name, HEADER_SETS.sender)) mapper.sender = index;
     else mapper.fields.push(index);
   });
   return mapper;
 }
 
-function detectEmailColumn(sampleRows, width) {
+function detectEmailColumn(sampleRows, width, headers) {
   let best = -1;
   let bestScore = 0;
   for (let column = 0; column < width; column += 1) {
+    const label = normHeader((headers || [])[column] || "");
+    if (label && headerHit(label, HEADER_SETS.sender)) continue;
     let score = 0;
     for (const row of sampleRows) {
       if (EMAIL_RE.test(cleanEmail(row[column]))) score += 1;
@@ -128,12 +144,25 @@ function rowFrom(values, mapper, headers, extraFields) {
   }
   const firstName = cell(values, mapper.first);
   const template = cell(values, mapper.template);
-  const sender = cell(values, mapper.sender);
-  const senderName = cell(values, mapper.sender_name);
+  let sender = cell(values, mapper.sender);
+  let senderName = cell(values, mapper.sender_name);
+  const copy = cell(values, mapper.cc);
+  const blind = cell(values, mapper.bcc);
+  if (sender && !EMAIL_RE.test(cleanEmail(sender))) {
+    if (!senderName) senderName = sender;
+    sender = "";
+  }
   if (firstName) fields.Name = firstName;
   if (template) fields.Template = template;
-  if (sender) fields.Sender = sender;
+  const receiver = cleanEmail(cell(values, mapper.email));
+  if (EMAIL_RE.test(receiver)) fields["Receiver email"] = receiver;
+  if (sender) {
+    fields.Sender = sender;
+    fields["Sender email"] = cleanEmail(sender);
+  }
   if (senderName) fields["Sender Name"] = senderName;
+  if (copy) fields.CC = copy;
+  if (blind) fields.BCC = blind;
   return {
     email: cell(values, mapper.email),
     first_name: firstName,
@@ -151,7 +180,7 @@ function consumeMatrix(matrix, sheetName, sheetCount, sink) {
   if (!matrix.length) return;
   const headers = (matrix[0] || []).map((value) => String(value || "").trim());
   const mapper = buildMapper(headers);
-  if (mapper.email < 0) mapper.email = detectEmailColumn(matrix.slice(1, 30), headers.length);
+  if (mapper.email < 0) mapper.email = detectEmailColumn(matrix.slice(1, 30), headers.length, headers);
   const extra = sheetCount > 1 ? { Sheet: sheetName } : null;
   for (let index = 1; index < matrix.length; index += 1) {
     const values = matrix[index] || [];
@@ -178,7 +207,7 @@ async function parseCsv(file, sink) {
     if (ctx.mapper.email < 0) {
       ctx.sample.push(values);
       if (ctx.sample.length >= 25) {
-        ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length);
+        ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length, ctx.headers);
         ctx.sample.forEach((sample) => sink.push(rowFrom(sample, ctx.mapper, ctx.headers)));
         ctx.sample = [];
       }

@@ -136,6 +136,13 @@
         <span>Templates</span>
         <div id="template-list" class="template-list"></div>
       </div>
+      <div id="html-template-view" class="html-template-view hidden">
+        <div class="spread">
+          <span class="hint">HTML template. This design is what gets sent. Merge tags such as {Name} still work.</span>
+          <button type="button" class="template-chip" data-action="template-html-edit">Edit HTML</button>
+        </div>
+        <iframe id="html-template-frame" title="HTML template" sandbox="allow-popups allow-popups-to-escape-sandbox allow-same-origin"></iframe>
+      </div>
       <div id="editor" class="editor" contenteditable="true" role="textbox" aria-multiline="true" data-placeholder="Write your message. Use {Affiliation} or {E} for Excel column E."></div>
       <div class="composer-foot">
       <div id="toolbar" class="toolbar">
@@ -143,6 +150,8 @@
         <button type="button" data-action="format" data-cmd="italic" title="Italic"><i data-lucide="italic"></i></button>
         <button type="button" data-action="format" data-cmd="underline" title="Underline"><i data-lucide="underline"></i></button>
         <button type="button" data-action="insert-link" title="Link"><i data-lucide="link"></i></button>
+        <button type="button" class="ga4-tool" data-action="open-ga4" title="GA4 tracker">GA4</button>
+        <button type="button" class="ga4-tool" data-action="insert-unsubscribe" title="Unsubscribe opens an email to conference.ictcs@gmail.com">Unsubscribe</button>
         <button type="button" data-action="format" data-cmd="insertUnorderedList" title="Bullets"><i data-lucide="list"></i></button>
         <button type="button" data-action="format" data-cmd="insertOrderedList" title="Numbered"><i data-lucide="list-ordered"></i></button>
         <label class="tool-field">Font
@@ -249,15 +258,18 @@
         </div>
         <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
         <div id="schedule-fields" class="schedule-grid hidden">
-          <input id="schedule-date" class="input" type="date">
-          <input id="schedule-time" class="input" type="time">
-          <select id="schedule-zone" class="input" aria-label="Timezone"></select>
+          <label>Start date<input id="schedule-date" class="input" type="date"></label>
+          <label>Start time<input id="schedule-time" class="input" type="time" value="07:00"></label>
+          <label>Timezone<select id="schedule-zone" class="input" aria-label="Timezone"></select></label>
         </div>
+        <p id="schedule-hint" class="hint hidden">Sending starts at this time, then one by one. A Gmail mailbox waits at least 90 seconds between its own emails. A date in the sheet with no time uses this clock. Leave Start-Mailing-Suite.bat open until then.</p>
       </details>
       <div class="composer-actions">
         <button type="button" class="btn btn-primary" id="send-button" data-action="smtp-send">SMTP Send</button>
         <button type="button" class="btn btn-warn" id="draft-button" data-action="smtp-draft">SMTP Draft</button>
         <button type="button" class="btn btn-ghost" data-action="save-draft">Save</button>
+        <button type="button" class="btn btn-ghost" data-action="open-ga4" title="Build a GA4 tracking link and insert it">GA4 link</button>
+        <button type="button" class="btn btn-ghost" data-action="insert-unsubscribe" title="Insert click here to unsubscribe. It opens an email to conference.ictcs@gmail.com">Unsubscribe</button>
         <button type="button" class="btn btn-ghost icon-attach" data-action="pick-attachment" title="Attach files"><i data-lucide="paperclip"></i></button>
         <input id="attach-input" type="file" multiple class="hidden">
         <div id="attach-list" class="attach-list"></div>
