@@ -674,11 +674,20 @@ def verify_password(password, salt, digest):
     return hmac.compare_digest(check, digest)
 
 
+def password_saved(row):
+    if row is None:
+        return False
+    try:
+        return bool(row["password_hash"]) and bool(row["password_salt"])
+    except (IndexError, KeyError):
+        return False
+
+
 def user_password_ready(row):
     if row is None:
         return False
     try:
-        return bool(row["password_set"]) and bool(row["password_hash"]) and bool(row["password_salt"])
+        return bool(row["password_set"]) and password_saved(row)
     except (IndexError, KeyError):
         return False
 
@@ -3069,6 +3078,16 @@ def test_sender_connection(sender):
     return ok, message
 
 
+def deliver_fresh_smtp(sender, message, target):
+    smtp = connect_smtp(sender)
+    try:
+        refused = smtp.sendmail(sender["user"], [target], message.as_bytes())
+        if refused:
+            raise smtplib.SMTPRecipientsRefused(refused)
+    finally:
+        safe_quit(smtp)
+
+
 def send_otp_email(target, code, purpose="login"):
     master = otp_sender() or refresh_otp_sender()
     if not master or not master["host"] or not master["user"] or not master["password"]:
@@ -3085,19 +3104,20 @@ def send_otp_email(target, code, purpose="login"):
 <div style="max-width:480px;margin:0 auto;padding:28px;border-radius:24px;background:#172033;border:1px solid rgba(255,255,255,0.15);color:#f4f7fb;">
 <p style="letter-spacing:.16em;text-transform:uppercase;font-size:12px;color:#9fb0c9;margin:0 0 8px;">Parth Mailing</p>
 <h1 style="font-size:22px;font-weight:600;margin:0 0 8px;">{html.escape(headline)}</h1>
-<p style="color:#c5d0e0;line-height:1.5;">This code expires in {minutes} minutes. If you did not ask for it, ignore this email.</p>
+<p style="color:#c5d0e0;line-height:1.5;">Your code is below. It expires in {minutes} minutes. If you did not ask for it, ignore this email.</p>
 <p style="font-size:36px;letter-spacing:10px;font-weight:700;background:#101826;border-radius:16px;padding:16px 12px;text-align:center;">{html.escape(code)}</p>
 </div></body></html>"""
     message = MIMEMultipart("alternative")
     message["From"] = build_aligned_from(master["display_name"] or "Parth Mailing", OTP_FROM)
     message["To"] = target
-    message["Subject"] = headline
+    message["Subject"] = f"{code} is your Parth Mailing code"
     message["Date"] = email.utils.formatdate(localtime=True)
-    message.attach(MIMEText(f"Your Parth Mailing sign-in code is {code}. It expires in {minutes} minutes.", "plain", "utf-8"))
+    message["Message-ID"] = email.utils.make_msgid(domain="gr-conferences.com")
+    message.attach(MIMEText(f"Your Parth Mailing code is {code}. It expires in {minutes} minutes.", "plain", "utf-8"))
     message.attach(MIMEText(body, "html", "utf-8"))
 
     def deliver(sender):
-        send_with_pool(sender, message, [target])
+        deliver_fresh_smtp(sender, message, target)
 
     try:
         deliver(master)
@@ -3107,6 +3127,7 @@ def send_otp_email(target, code, purpose="login"):
             try:
                 deliver(refreshed)
                 write_mailbox_status(True, f"Sign-in codes send from {OTP_FROM}.")
+                log(f"Sign-in code emailed to {target} from {OTP_FROM}.")
                 return
             except Exception as exc:
                 first = exc
@@ -3116,9 +3137,10 @@ def send_otp_email(target, code, purpose="login"):
         for hidden in (master.get("password") or "", (refreshed or {}).get("password") or ""):
             if hidden and hidden in raw:
                 raw = raw.replace(hidden, "[redacted]")
-        log(f"Sign-in email failed: {type(first).__name__}: {raw[:240]}")
+        log(f"Sign-in email to {target} failed: {type(first).__name__}: {raw[:240]}")
         raise ApiError("The 6-digit sign-in code could not be emailed. Wait a moment and try again.", 502) from None
     write_mailbox_status(True, f"Sign-in codes send from {OTP_FROM}.")
+    log(f"Sign-in code emailed to {target} from {OTP_FROM}.")
 
 
 def notify_admin_mailbox_request(user_email, display_name, mailbox):
@@ -3754,13 +3776,13 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(f"Use a work address ending with {domain_suffix()}.")
         with db() as conn:
             row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-            if row and user_password_ready(row) and not account_enabled(row):
+            if row and password_saved(row) and not account_enabled(row):
                 raise ApiError("This account is disabled.", 403)
-            if row and user_password_ready(row):
+            if row and password_saved(row):
                 if not verify_password(password, row["password_salt"], row["password_hash"]):
                     raise ApiError("Email or password is incorrect.")
                 conn.execute(
-                    "UPDATE users SET last_login=?, role=? WHERE email=?",
+                    "UPDATE users SET last_login=?, role=?, password_set=1, enabled=1 WHERE email=?",
                     (time.time(), role_for(email), email),
                 )
                 add_audit(conn, email, "signed_in", "password")
@@ -3807,8 +3829,17 @@ class Handler(BaseHTTPRequestHandler):
         })
 
     def request_otp(self, data):
+        email = normalize_email(data.get("email"))
         purpose = str(data.get("purpose") or "login").strip().lower() or "login"
-        ttl = issue_otp(normalize_email(data.get("email")), purpose)
+        if purpose not in ("login", "register", "first", "reset"):
+            purpose = "login"
+        with db() as conn:
+            row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        if purpose in ("login", "first") and password_saved(row):
+            purpose = "login"
+        elif purpose == "login" and not password_saved(row):
+            raise ApiError("Create an account with your name and a password. A 6-digit code will be emailed.")
+        ttl = issue_otp(email, purpose)
         self.send_json(200, {"ok": True, "expires_in": ttl, "delivery": "email", "purpose": purpose})
 
     def verify_otp(self, data):

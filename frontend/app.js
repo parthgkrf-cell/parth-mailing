@@ -1777,8 +1777,8 @@ function codeDigits() {
 function paintLoginButton() {
   const button = document.getElementById("login-submit");
   if (!button) return;
-  const ready = codeDigits().length === 6 || state.otpDeadline;
-  if (ready) button.textContent = state.otpPurpose === "reset" ? "Reset password" : "Confirm code";
+  const confirming = state.otpDeadline && codeDigits().length === 6;
+  if (confirming) button.textContent = state.otpPurpose === "reset" ? "Reset password" : "Confirm code";
   else if (state.authMode === "register") button.textContent = "Create account";
   else if (state.authMode === "forgot") button.textContent = "Email reset code";
   else button.textContent = "Sign in";
@@ -1805,10 +1805,10 @@ function setAuthMode(mode) {
   const tag = document.getElementById("auth-tag");
   if (tag) {
     tag.textContent = state.authMode === "register"
-      ? "Enter your name, email, and password. Paste the 6-digit code from parth@gr-conferences.com."
+      ? "Enter your name, email, and password. Paste the 6-digit code emailed from parth@gr-conferences.com."
       : state.authMode === "forgot"
         ? "Paste the 6-digit code from parth@gr-conferences.com, then choose a new password."
-        : "Sign in with email and password. Paste the 6-digit code from parth@gr-conferences.com when it arrives.";
+        : "Existing accounts sign in with email and password. A new account also pastes the 6-digit code from parth@gr-conferences.com.";
   }
   paintLoginButton();
 }
@@ -1819,6 +1819,7 @@ function showOtp(on, purpose) {
   if (panel) panel.classList.remove("hidden");
   const code = document.getElementById("login-code");
   if (code && !on) code.value = "";
+  if (code) code.autocomplete = on ? "one-time-code" : "off";
   const passwordPanel = document.getElementById("password-panel");
   if (passwordPanel) passwordPanel.classList.remove("hidden");
   setAuthMode(state.authMode);
@@ -1837,13 +1838,14 @@ async function finishAuth(data, message) {
 
 async function requestOtp() {
   const email = normalizeEmail(document.getElementById("login-email").value);
-  const purpose = state.otpPurpose || (state.authMode === "forgot" ? "reset" : state.authMode === "register" ? "register" : "first");
+  const purpose = state.authMode === "forgot" ? "reset" : state.authMode === "register" ? "register" : "login";
   const data = await api("/api/auth/request-otp", { method: "POST", body: JSON.stringify({ email, purpose }) });
   state.otpEmail = email;
   state.otpDeadline = Date.now() + (data.expires_in || 300) * 1000;
   showOtp(true, data.purpose || purpose);
   document.getElementById("login-code").value = "";
   document.getElementById("login-code").focus();
+  toast("The 6-digit code was emailed from parth@gr-conferences.com. Paste it below.");
 }
 
 async function verifyOtp() {
@@ -1861,6 +1863,28 @@ async function submitAuth() {
   const password = document.getElementById("login-password").value;
   const name = document.getElementById("login-name").value.trim();
   const code = codeDigits();
+  if (state.authMode === "login") {
+    if (state.otpDeadline && code.length === 6) {
+      await verifyOtp();
+      return;
+    }
+    if (code.length && code.length < 6 && state.otpDeadline) {
+      throw new Error("Paste the full 6-digit code from the email.");
+    }
+    const data = await api("/api/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ email, password, display_name: name }),
+    });
+    if (data.needs_otp) {
+      state.otpEmail = email;
+      state.otpDeadline = Date.now() + (data.expires_in || 300) * 1000;
+      showOtp(true, data.purpose || "first");
+      toast("A 6-digit code was emailed from parth@gr-conferences.com. Paste it below.");
+      return;
+    }
+    await finishAuth(data);
+    return;
+  }
   if (code.length && code.length < 6) throw new Error("Paste the full 6-digit code from the email.");
   if (code.length === 6) {
     await verifyOtp();
@@ -1885,18 +1909,6 @@ async function submitAuth() {
     toast("Enter the 6-digit code emailed from parth@gr-conferences.com and your new password.");
     return;
   }
-  const data = await api("/api/auth/login", {
-    method: "POST",
-    body: JSON.stringify({ email, password, display_name: name }),
-  });
-  if (data.needs_otp) {
-    state.otpEmail = email;
-    state.otpDeadline = Date.now() + (data.expires_in || 300) * 1000;
-    showOtp(true, data.purpose || "first");
-    toast("First login needs the 6-digit code emailed from parth@gr-conferences.com.");
-    return;
-  }
-  await finishAuth(data);
 }
 
 function mountGoogle() {
