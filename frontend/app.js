@@ -377,7 +377,7 @@ function htmlRecipients() {
       <div class="row">
         <button class="btn btn-primary" type="button" data-action="fetch-sheet">Fetch sheet</button>
       </div>
-      <p class="hint">Receiver email is who gets the message. Sender email, or Account Email, is the mailbox that sends it, such as parth@gr-conferences.com. Sender Name is the name people see, such as ICTCS Conference Support. CC on that row is copied on the message. The mailbox label is not used when Sender Name is filled in. S_Date and S_Time still set the schedule. Sender email must be a mailbox this login is allowed to use.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
+      <p class="hint">Receiver email is who gets the message. Sender email, or Account Email, is the mailbox that sends it, such as parth@gr-conferences.com. Sender Name is the name people see, such as ICTCS Conference Support. CC on that row is copied on the message. The mailbox label is not used when Sender Name is filled in. Sending starts when you press Start sending. A later S_Date and S_Time waits until that time. Gmail waits 90 seconds and stops at 400 in 24 hours. Workspace waits 4 seconds and stops at 1,800. Sender email must be a mailbox this login is allowed to use.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
       <div id="dropzone" class="dropzone">
         <p>Or drop .xlsx, .xls, or .csv files here</p>
         <p class="hint">In the message, {Affiliation} uses that column’s name and {E} uses column E. The same works for every Excel column.</p>
@@ -1435,10 +1435,10 @@ function paintScheduleButton() {
   const live = liveCampaign();
   const label = button.querySelector("span");
   button.classList.toggle("is-stop", Boolean(live));
-  if (label) label.textContent = live ? "Stop" : "Start Scheduling";
+  if (label) label.textContent = live ? "Stop" : "Start sending";
   button.title = live
     ? `Stop ${live.subject || "this campaign"} (${live.status})`
-    : "Start at the S_Date and S_Time from the sheet";
+    : "Start sending now";
 }
 
 function sheetField(row, names) {
@@ -1513,15 +1513,7 @@ function localDateValue(date) {
 
 function ensureScheduleClock() {
   const dateInput = document.getElementById("schedule-date");
-  const timeInput = document.getElementById("schedule-time");
-  if (timeInput && !timeInput.value) timeInput.value = "07:00";
-  if (dateInput && !dateInput.value) {
-    const next = new Date();
-    const [hour, minute] = String((timeInput && timeInput.value) || "07:00").split(":").map(Number);
-    const start = new Date(next.getFullYear(), next.getMonth(), next.getDate(), hour || 0, minute || 0, 0, 0);
-    if (start.getTime() <= Date.now() + 60 * 1000) next.setDate(next.getDate() + 1);
-    dateInput.value = localDateValue(next);
-  }
+  if (dateInput && !dateInput.value) dateInput.value = localDateValue(new Date());
 }
 
 function sheetTimes(rows, zone) {
@@ -1530,11 +1522,6 @@ function sheetTimes(rows, zone) {
     const timeRaw = sheetField(row, ["S_Time", "STime", "Schedule Time", "Send Time"]);
     const date = parseSheetDate(dateRaw);
     const time = parseSheetTime(timeRaw) || parseSheetTime(dateRaw);
-    if (date && !time) {
-      const today = localDateValue(new Date());
-      if (date <= today) return { email: row.email, date, time: "now", unix: Math.floor(Date.now() / 1000) };
-      return null;
-    }
     if (!date || !time) return null;
     return { email: row.email, date, time, unix: zonedToUnix(date, time, zone) };
   }).filter(Boolean);
@@ -1786,36 +1773,24 @@ async function sendCampaign(action, options) {
   let scheduleNote = "";
   const zone = document.getElementById("schedule-zone").value || "UTC";
   if (scheduled) {
-    const found = sheetTimes(rows, zone);
-    const fromSheet = Boolean(options && options.fromSheet) && found.length > 0;
-    if (fromSheet) {
-      found.sort((left, right) => left.unix - right.unix);
-      const distinct = new Set(found.map((item) => `${item.date} ${item.time}`)).size;
-      const missing = rows.length - found.length;
-      if (found[0].time === "now") {
-        scheduled = false;
-        scheduleAt = null;
-        scheduleNote = "S_Time is blank, so the message sends now. It is filed in the sender Sent folder and delivered to the receiver inbox.";
-      } else {
-        scheduleAt = found[0].unix;
-        scheduleNote = distinct > 1
-          ? `First row sends ${found[0].date} ${found[0].time}. ${distinct} different S_Date and S_Time values; each row waits for its own.`
-          : `S_Date ${found[0].date} and S_Time ${found[0].time} from the sheet.`;
-      }
-      if (missing && found[0].time !== "now") scheduleNote += ` ${missing} rows have no sheet time and use that first time.`;
-    } else {
-      ensureScheduleClock();
-      const date = (document.getElementById("schedule-date") || {}).value || "";
-      const time = (document.getElementById("schedule-time") || {}).value || "";
-      if (!date || !time) throw new Error("Choose the date and time sending should start. Use 07:00 for 7:00 in the morning.");
-      scheduleAt = zonedToUnix(date, time, zone);
-      if (!scheduleAt || scheduleAt <= Math.floor(Date.now() / 1000) + 20) {
-        throw new Error("That time has already passed. Pick a later time, such as 07:00 tomorrow morning.");
-      }
-      const later = found.filter((item) => item.unix > scheduleAt + 30).length;
-      scheduleNote = `Sending starts ${date} ${time} (${zone}), then one by one. A Gmail mailbox waits at least 90 seconds between its own emails. Leave Start-Mailing-Suite.bat open.`;
-      if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait for that time.`;
+    ensureScheduleClock();
+    const date = (document.getElementById("schedule-date") || {}).value || "";
+    const time = (document.getElementById("schedule-time") || {}).value || "";
+    if (!date || !time) throw new Error("Choose the date and time sending should start.");
+    scheduleAt = zonedToUnix(date, time, zone);
+    if (!scheduleAt || scheduleAt <= Math.floor(Date.now() / 1000) + 20) {
+      throw new Error("That time has already passed. Pick a later time.");
     }
+    const found = sheetTimes(rows, zone);
+    const later = found.filter((item) => item.unix > scheduleAt + 30).length;
+    scheduleNote = `Nothing sends before ${date} ${time} (${zone}). Gmail then waits at least 90 seconds between its own emails and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800. Leave Start-Mailing-Suite.bat open.`;
+    if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait until that time.`;
+  } else {
+    const found = sheetTimes(rows, zone);
+    const later = found.filter((item) => item.unix > Math.floor(Date.now() / 1000) + 30).length;
+    scheduleNote = "Sending starts now.";
+    if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait until that time.`;
+    scheduleNote += " Gmail waits at least 90 seconds between its own emails and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800.";
   }
   const pace = {
     delay_min_seconds: Number(document.getElementById("delay-min").value),
@@ -1828,8 +1803,8 @@ async function sendCampaign(action, options) {
   const mailboxLine = mode === "draft"
     ? `IMAP drafts on ${sender && (sender.display_name || sender.email) || "the selected mailbox"}.`
     : (senders.length > 1
-      ? `${senders.length} assigned mailboxes will send in parallel. Each Gmail mailbox waits at least 90 seconds between its own emails.`
-      : `One-by-one SMTP from ${sender && (sender.display_name || sender.email) || "the assigned mailbox"}. Gmail policy applies.`);
+      ? `${senders.length} assigned mailboxes send in parallel. Each Gmail address waits at least 90 seconds and stops at 400 in 24 hours. Each Workspace address waits at least 4 seconds and stops at 1,800.`
+      : `One mailbox sends one by one. Gmail waits at least 90 seconds and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800.`);
   const sheetAccounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
   const sheetNames = [...new Set(rows.map((row) => rowSenderName(row)).filter(Boolean))];
   const sheetCopies = [...new Set(rows.map((row) => looseField(row, CC_KEYS)).filter(Boolean))];
@@ -1924,7 +1899,7 @@ async function toggleSchedule() {
   const live = liveCampaign();
   if (live) {
     const agreed = await askConfirm(
-      "Stop this schedule?",
+      "Stop this send?",
       `${live.subject || "This campaign"} is ${live.status}. Queued messages will not be sent.`,
       "Stop"
     );
@@ -1934,16 +1909,11 @@ async function toggleSchedule() {
     await refreshCampaigns();
     paintScheduleButton();
     if (["home", "campaigns", "history", "master"].includes(state.view)) renderView();
-    toast("Schedule stopped");
+    toast("Sending stopped");
     return;
   }
-  const fields = document.getElementById("schedule-fields");
-  const details = document.querySelector(".composer-options");
-  if (fields) fields.classList.remove("hidden");
-  if (details) details.open = true;
   captureTemplate();
-  ensureScheduleClock();
-  await sendCampaign("send", { schedule: true, fromSheet: true });
+  await sendCampaign("send");
 }
 
 async function downloadReport(id) {

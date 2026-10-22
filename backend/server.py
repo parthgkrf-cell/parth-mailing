@@ -2070,8 +2070,7 @@ def campaign_action(campaign):
 def is_consumer_gmail(sender):
     email = normalize_email((sender or {}).get("user") or (sender or {}).get("email") or "")
     domain = email.split("@", 1)[1] if "@" in email else ""
-    host = str((sender or {}).get("host") or "").lower()
-    return domain in ("gmail.com", "googlemail.com") or "gmail.com" in host
+    return domain in ("gmail.com", "googlemail.com")
 
 
 def imap_host_for(sender):
@@ -2573,15 +2572,13 @@ def row_ready_unix(fields, timezone, fallback):
     day = parse_sheet_date(date_raw)
     clock = parse_sheet_time(time_raw) or parse_sheet_time(date_raw)
     if day and not clock:
-        today = datetime.datetime.now(zone).date()
-        if day <= today:
-            return time.time()
-        if fallback:
-            try:
-                moment = datetime.datetime.fromtimestamp(float(fallback), zone)
-                clock = (moment.hour, moment.minute)
-            except (TypeError, ValueError, OSError):
-                clock = None
+        if not fallback:
+            return None
+        try:
+            moment = datetime.datetime.fromtimestamp(float(fallback), zone)
+            clock = (moment.hour, moment.minute)
+        except (TypeError, ValueError, OSError):
+            clock = None
     if not day or not clock:
         return "invalid"
     local = datetime.datetime(day.year, day.month, day.day, clock[0], clock[1], tzinfo=zone)
@@ -4516,9 +4513,6 @@ class Handler(BaseHTTPRequestHandler):
         if not subject or not html_to_text(html_body):
             raise ApiError("Subject and message are required.")
         pace = normalize_pace(data.get("pace") or {})
-        if any(is_consumer_gmail(item) for item in pool):
-            pace["delay_min_seconds"] = max(pace["delay_min_seconds"], GMAIL_CONSUMER_GAP)
-            pace["delay_max_seconds"] = max(pace["delay_max_seconds"], pace["delay_min_seconds"])
         schedule_at = parse_when(data.get("schedule_at"))
         timezone = str(data.get("timezone") or "UTC")
         try:

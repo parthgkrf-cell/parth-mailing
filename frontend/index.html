@@ -77,8 +77,8 @@
         <button class="nav-btn master-only hidden" type="button" data-action="nav" data-view="master"><i data-lucide="shield"></i><span>Admin</span></button>
       </nav>
       <div class="side-foot">
-        <button id="schedule-toggle" class="nav-btn schedule-side" type="button" data-action="schedule-toggle" title="Start at the S_Date and S_Time from the sheet">
-          <i data-lucide="calendar-clock"></i><span>Start Scheduling</span>
+        <button id="schedule-toggle" class="nav-btn schedule-side" type="button" data-action="schedule-toggle" title="Start sending now">
+          <i data-lucide="calendar-clock"></i><span>Start sending</span>
         </button>
         <div class="side-foot-row">
           <div id="relay-pill" class="pill">Relay</div>
@@ -251,18 +251,18 @@
       <details class="composer-options">
         <summary>Sending pace and schedule</summary>
         <div class="pace-grid">
-          <label>Delay min (s)<input id="delay-min" class="input" type="number" min="0" max="300" step="0.5" value="4"></label>
-          <label>Delay max (s)<input id="delay-max" class="input" type="number" min="0" max="300" step="0.5" value="12"></label>
+          <label>Delay min (s)<input id="delay-min" class="input" type="number" min="4" max="300" step="0.5" value="4"></label>
+          <label>Delay max (s)<input id="delay-max" class="input" type="number" min="4" max="300" step="0.5" value="12"></label>
           <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="20"></label>
           <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="2"></label>
         </div>
         <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
         <div id="schedule-fields" class="schedule-grid hidden">
           <label>Start date<input id="schedule-date" class="input" type="date"></label>
-          <label>Start time<input id="schedule-time" class="input" type="time" value="07:00"></label>
+          <label>Start time<input id="schedule-time" class="input" type="time"></label>
           <label>Timezone<select id="schedule-zone" class="input" aria-label="Timezone"></select></label>
         </div>
-        <p id="schedule-hint" class="hint hidden">Sending starts at this time, then one by one. A Gmail mailbox waits at least 90 seconds between its own emails. A date in the sheet with no time uses this clock. Leave Start-Mailing-Suite.bat open until then.</p>
+        <p id="schedule-hint" class="hint hidden">Sending waits until the date and time you choose. A later S_Date and S_Time waits until that time. Gmail then waits at least 90 seconds and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800. Leave Start-Mailing-Suite.bat open until then.</p>
       </details>
       <div class="composer-actions">
         <button type="button" class="btn btn-primary" id="send-button" data-action="smtp-send">SMTP Send</button>
