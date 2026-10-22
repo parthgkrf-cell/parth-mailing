@@ -850,7 +850,7 @@ def issue_otp(email, purpose):
     if not otp_is_live():
         refresh_otp_sender()
     if not otp_is_live():
-        raise ApiError("Sign-in codes are not sending yet. Ask the admin to check the sign-in mailbox.", 503)
+        raise ApiError("Sign-in codes are not sending from this computer yet. Open Admin and choose Fetch mailing accounts, then try the code again.", 503)
     ttl = otp_ttl()
     now = time.time()
     code = f"{secrets.randbelow(900000) + 100000}"
@@ -5379,6 +5379,8 @@ def main():
     init_db()
     sync_admin_sender()
     recover_incomplete()
+    if str(load_config().get("mailbox_sheet_url") or "").strip():
+        refresh_otp_sender()
     config = load_config()
     host = str((config.get("server") or {}).get("host") or "127.0.0.1")
     port = int((config.get("server") or {}).get("port") or 8787)

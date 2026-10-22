@@ -64,7 +64,7 @@ def command_line(pid):
     return out.strip()
 
 
-def stop_broken_relay(port):
+def stop_desk_relay(port, reason):
     pids = listening_pids(port)
     if not pids:
         return True
@@ -74,7 +74,7 @@ def stop_broken_relay(port):
             say(f"Port {port} is already used by another program (pid {pid}).")
             say("Close that program, then double-click Start-Mailing-Suite.bat again.")
             return False
-        say(f"Replacing a relay that is not answering (pid {pid}).")
+        say(reason)
         subprocess.run(["taskkill", "/PID", str(pid), "/F"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     for _ in range(20):
         if not listening_pids(port):
@@ -82,6 +82,57 @@ def stop_broken_relay(port):
         time.sleep(0.25)
     say(f"Port {port} is still busy. Close the other Parth Mailing window and try again.")
     return False
+
+
+def stop_broken_relay(port):
+    return stop_desk_relay(port, f"Replacing a relay that is not answering on port {port}.")
+
+
+def newest_code_time():
+    stamps = []
+    for path in (
+        os.path.join(HERE, "server.py"),
+        os.path.join(HERE, "launch_desk.py"),
+        os.path.join(ROOT, "frontend", "app.js"),
+        os.path.join(ROOT, "frontend", "index.html"),
+    ):
+        try:
+            stamps.append(os.path.getmtime(path))
+        except OSError:
+            continue
+    return max(stamps) if stamps else 0
+
+
+def process_started(pid):
+    script = (
+        "$p = Get-Process -Id %d -ErrorAction SilentlyContinue; "
+        "if (-not $p) { exit 1 }; "
+        "[DateTimeOffset]::new($p.StartTime).ToUnixTimeSeconds()"
+    ) % int(pid)
+    try:
+        out = subprocess.check_output(
+            ["powershell", "-NoProfile", "-Command", script],
+            text=True,
+            errors="replace",
+        )
+    except (OSError, subprocess.CalledProcessError):
+        return 0
+    try:
+        return float(out.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        return 0
+
+
+def relay_is_current(port):
+    newest = newest_code_time()
+    pids = listening_pids(port)
+    if not pids or not newest:
+        return False
+    for pid in pids:
+        started = process_started(pid)
+        if not started or newest > started + 2:
+            return False
+    return True
 
 
 def ensure_cryptography():
@@ -115,12 +166,16 @@ def main():
     config = server.ensure_config()
     port = int((config.get("server") or {}).get("port") or 8787)
     url = f"http://127.0.0.1:{port}/"
-    if page_ok(port):
+    if page_ok(port) and relay_is_current(port):
         if os.environ.get("PARTH_NO_BROWSER") != "1":
             webbrowser.open(url)
         say(f"The desk is already running at {url}")
         say("You can close this window. Leave the other Parth Mailing window open.")
         return 2
+    if page_ok(port):
+        say("A newer desk was downloaded. Restarting it.")
+        if not stop_desk_relay(port, "Closing the previous desk so the update can start."):
+            return 1
     if not stop_broken_relay(port):
         return 1
     say(f"Starting the desk at {url}")
