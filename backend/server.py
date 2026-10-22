@@ -1601,15 +1601,18 @@ def queue_drive_upload(local_path, segments, campaign_id, column):
     threading.Thread(target=runner, daemon=True).start()
 
 
+_DNS_CACHE = {}
+
+
 def ipv4_socket(host, port, timeout):
+    host = str(host or "").strip()
+    if not host:
+        raise OSError("The mail server name is missing. Use smtp.gmail.com for Gmail and Workspace.")
     last = None
-    for family in (socket.AF_INET, socket.AF_INET6):
-        try:
-            infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
-        except socket.gaierror as exc:
-            last = exc
-            continue
-        for family_id, socktype, proto, _canon, address in infos:
+    cache_key = (host.lower(), int(port))
+    cached = _DNS_CACHE.get(cache_key)
+    if cached and cached[0] > time.time():
+        for family_id, socktype, proto, address in cached[1]:
             sock = socket.socket(family_id, socktype, proto)
             try:
                 sock.settimeout(timeout)
@@ -1618,6 +1621,31 @@ def ipv4_socket(host, port, timeout):
             except OSError as exc:
                 last = exc
                 sock.close()
+    for _attempt in range(4):
+        found = []
+        for family in (socket.AF_INET, socket.AF_INET6):
+            try:
+                infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+            except socket.gaierror as exc:
+                last = exc
+                continue
+            for family_id, socktype, proto, _canon, address in infos:
+                found.append((family_id, socktype, proto, address))
+                sock = socket.socket(family_id, socktype, proto)
+                try:
+                    sock.settimeout(timeout)
+                    sock.connect(address)
+                    if found:
+                        _DNS_CACHE[cache_key] = (time.time() + 600, found)
+                    return sock
+                except OSError as exc:
+                    last = exc
+                    sock.close()
+        if found:
+            break
+        time.sleep(1.5)
+    if isinstance(last, socket.gaierror):
+        raise OSError("The computer could not find the mail server smtp.gmail.com. Check the internet connection. This address will be tried again.")
     if last:
         raise last
     raise OSError(f"Could not reach {host}:{port}")
@@ -1666,6 +1694,8 @@ def friendly_smtp_error(exc):
         return "Gmail refused this app password. Create a new 16-character app password in the Google account and save it again."
     if isinstance(exc, (smtplib.SMTPServerDisconnected, ConnectionResetError, ConnectionAbortedError, TimeoutError, socket.timeout)) or "unexpectedly closed" in lowered or "timed out" in lowered:
         return "Gmail closed the connection. Create a new 16-character app password and save it again. If it still fails, Google is blocking SMTP for this mailbox."
+    if "getaddrinfo" in lowered or "name or service not known" in lowered or "could not find the mail server" in lowered:
+        return "The computer could not find the mail server. Check the internet connection. Sending will try this address again."
     return text[:400]
 
 
@@ -1786,8 +1816,6 @@ def account_error_is_fatal(message):
         "closed the connection",
         "unexpectedly closed",
         "timed out",
-        "getaddrinfo",
-        "name or service not known",
         "connection refused",
         "password missing",
     )
@@ -2932,22 +2960,18 @@ def mark_pace(sender_email):
         conn.execute("DELETE FROM pace WHERE sent_at < ?", (time.time() - 86400 * 2,))
 
 
-def recent_sends(owner, since):
+def recent_mailbox_sends(sender_email, since):
     with db() as conn:
         rows = conn.execute(
-            """
-            SELECT r.sent_at FROM recipients r
-            JOIN campaigns c ON c.id = r.campaign_id
-            WHERE c.owner=? AND r.status='SENT' AND r.sent_at>=?
-            """,
-            (owner, since),
+            "SELECT sent_at FROM pace WHERE sender_email=? AND sent_at>=?",
+            (normalize_email(sender_email), since),
         ).fetchall()
     return [row["sent_at"] for row in rows]
 
 
-def rate_wait_seconds(owner, limits):
+def rate_wait_seconds(sender_email, limits):
     now = time.time()
-    sent = recent_sends(owner, now - 86400)
+    sent = recent_mailbox_sends(sender_email, now - 86400)
     waits = []
     for key, window in (("per_minute", 60), ("per_hour", 3600), ("per_day", 86400)):
         cap = int(limits.get(key) or 0)
@@ -3034,6 +3058,20 @@ def next_ready_at(campaign_id, sender_id=None):
                 (campaign_id,),
             ).fetchone()
     return row["n"] if row and row["n"] else None
+
+
+DNS_RETRY = {}
+
+
+def network_lookup_failed(text):
+    lowered = str(text or "").lower()
+    return any(token in lowered for token in (
+        "getaddrinfo",
+        "could not find the mail server",
+        "name or service not known",
+        "nodename nor servname",
+        "temporary failure in name resolution",
+    ))
 
 
 def save_outcome(campaign, recipient, outcome, sender):
@@ -3301,7 +3339,7 @@ def process_account_send(campaign_id, sender_id):
             SLEEP_UNTIL[key] = time.time() + 30
             set_hold(camp["id"], f"Company daily limit of {company_cap} has been reached.", 30)
             return
-    wait = rate_wait_seconds(camp["owner"], limits)
+    wait = rate_wait_seconds(sender["user"], limits)
     if wait > 0:
         SLEEP_UNTIL[key] = time.time() + min(wait, 30)
         return
@@ -3325,6 +3363,16 @@ def process_account_send(campaign_id, sender_id):
         outcome = deliver(camp, recipient, sender)
     except Exception as exc:
         outcome = {"status": "FAILED", "code": "", "error": str(exc)[:800], "simulated": False}
+    if network_lookup_failed(outcome.get("error") or ""):
+        tries = DNS_RETRY.get(recipient["id"], 0) + 1
+        DNS_RETRY[recipient["id"]] = tries
+        if tries < 5:
+            outcome = {"status": "QUEUED", "code": "", "error": "", "simulated": False}
+            SLEEP_UNTIL[key] = time.time() + 20
+            log(f"Mail server lookup failed for {sender.get('user') or ''}; {recipient['email']} will be tried again")
+        else:
+            outcome["status"] = "FAILED"
+            outcome["error"] = "The computer could not find the mail server. Check the internet connection, then start sending again."
     save_outcome(camp, recipient, outcome, sender)
     after_send_delay(camp, sender)
     label = "SIMULATED" if outcome.get("simulated") else outcome["status"]
