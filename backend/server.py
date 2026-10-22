@@ -4306,13 +4306,16 @@ class Handler(BaseHTTPRequestHandler):
         purpose = str(data.get("purpose") or "login").strip().lower() or "login"
         if purpose not in ("login", "register", "first", "reset"):
             purpose = "login"
-        with db() as conn:
-            row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-        if purpose in ("login", "first") and password_saved(row):
-            purpose = "login"
-        elif purpose == "login" and not password_saved(row):
-            raise ApiError("Create an account with your name and a password. A 6-digit code will be emailed.")
+        if is_admin_email(email) and purpose == "login":
+            raise ApiError("The admin signs in with name and password.")
+        name = " ".join(str(data.get("display_name") or data.get("name") or "").split())[:80]
         ttl = issue_otp(email, purpose)
+        if len(name) >= 2:
+            with db() as conn:
+                conn.execute(
+                    "UPDATE users SET display_name=? WHERE email=? AND TRIM(COALESCE(display_name, ''))=''",
+                    (name, email),
+                )
         self.send_json(200, {"ok": True, "expires_in": ttl, "delivery": "email", "purpose": purpose})
 
     def verify_otp(self, data):
@@ -4376,15 +4379,27 @@ class Handler(BaseHTTPRequestHandler):
                         account = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
                 else:
                     conn.execute("DELETE FROM otps WHERE email=?", (email,))
-                    conn.execute(
-                        """
-                        UPDATE users
-                        SET last_login=?, role=?, enabled=1,
-                            password_set=CASE WHEN password_hash!='' AND password_salt!='' THEN 1 ELSE password_set END
-                        WHERE email=?
-                        """,
-                        (now, role_for(email), email),
-                    )
+                    password = str(data.get("password") or "")
+                    if len(password) >= 6:
+                        salt, digest = hash_password(password)
+                        conn.execute(
+                            """
+                            UPDATE users
+                            SET password_hash=?, password_salt=?, password_set=1, last_login=?, role=?, enabled=1
+                            WHERE email=?
+                            """,
+                            (digest, salt, now, role_for(email), email),
+                        )
+                    else:
+                        conn.execute(
+                            """
+                            UPDATE users
+                            SET last_login=?, role=?, enabled=1,
+                                password_set=CASE WHEN password_hash!='' AND password_salt!='' THEN 1 ELSE password_set END
+                            WHERE email=?
+                            """,
+                            (now, role_for(email), email),
+                        )
                     add_audit(conn, email, "signed_in", "otp")
                     account = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         if failure:

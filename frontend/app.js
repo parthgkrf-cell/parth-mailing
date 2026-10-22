@@ -2289,7 +2289,7 @@ function setAuthMode(mode) {
       ? "Enter your name, email, and password. Paste the 6-digit code emailed from parth@gr-conferences.com."
       : state.authMode === "forgot"
         ? "Paste the 6-digit code from parth@gr-conferences.com, then choose a new password."
-        : "Existing accounts sign in with email and password. A new account also pastes the 6-digit code from parth@gr-conferences.com.";
+        : "Sign in with email and password. If an admin removed the account, choose Email me a code. The code comes from parth@gr-conferences.com.";
   }
   paintLoginButton();
 }
@@ -2320,7 +2320,14 @@ async function finishAuth(data, message) {
 async function requestOtp() {
   const email = normalizeEmail(document.getElementById("login-email").value);
   const purpose = state.authMode === "forgot" ? "reset" : state.authMode === "register" ? "register" : "login";
-  const data = await api("/api/auth/request-otp", { method: "POST", body: JSON.stringify({ email, purpose }) });
+  const data = await api("/api/auth/request-otp", {
+    method: "POST",
+    body: JSON.stringify({
+      email,
+      purpose,
+      display_name: (document.getElementById("login-name").value || "").trim(),
+    }),
+  });
   state.otpEmail = email;
   state.otpDeadline = Date.now() + (data.expires_in || 300) * 1000;
   showOtp(true, data.purpose || purpose);
@@ -2333,8 +2340,8 @@ async function verifyOtp() {
   const email = normalizeEmail(document.getElementById("login-email").value);
   const code = codeDigits();
   const password = document.getElementById("login-password").value;
-  const body = { email, code };
-  if (state.otpPurpose === "reset") body.password = password;
+  const body = { email, code, display_name: (document.getElementById("login-name").value || "").trim() };
+  if (state.otpPurpose === "reset" || password.length >= 6) body.password = password;
   const data = await api("/api/auth/verify-otp", { method: "POST", body: JSON.stringify(body) });
   await finishAuth(data, "Signed in");
 }
