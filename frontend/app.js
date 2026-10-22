@@ -2281,6 +2281,8 @@ function setAuthMode(mode) {
     passwordLabel.textContent = state.authMode === "forgot" || state.otpPurpose === "reset" ? "New password" : "Password";
   }
   if (forgot) forgot.classList.toggle("hidden", state.authMode === "forgot");
+  const codePanel = document.getElementById("otp-panel");
+  if (codePanel) codePanel.classList.toggle("hidden", !state.otpDeadline);
   const tag = document.getElementById("auth-tag");
   if (tag) {
     tag.textContent = state.authMode === "register"
@@ -2830,7 +2832,9 @@ const actions = {
     const data = await api("/api/senders/request", { method: "POST", body: JSON.stringify({ sender_id: el.dataset.id }) });
     await refreshCatalog();
     renderView();
-    toast(data.emailed ? "Request sent. The admin got an email." : "Request saved. The approval email could not be sent.");
+    toast(data.emailed
+      ? (data.resent ? "Request sent again. The admin got an email." : "Request sent. The admin got an email.")
+      : "Request saved on this desk. The approval email could not be sent.");
   },
   async "request-mailbox"() {
     const email = (document.getElementById("request-mailbox") || {}).value || "";
@@ -2838,7 +2842,9 @@ const actions = {
     const data = await api("/api/senders/request", { method: "POST", body: JSON.stringify({ email: email.trim() }) });
     await refreshCatalog();
     renderView();
-    toast(data.emailed ? "Request sent. The admin got an email." : "Request saved. The approval email could not be sent.");
+    toast(data.emailed
+      ? (data.resent ? "Request sent again. The admin got an email." : "Request sent. The admin got an email.")
+      : "Request saved on this desk. The approval email could not be sent.");
   },
   async "campaign-control"(el) {
     await api(`/api/campaigns/${el.dataset.id}/control`, { method: "POST", body: JSON.stringify({ action: el.dataset.op }) });

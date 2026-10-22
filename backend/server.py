@@ -3537,17 +3537,16 @@ def send_otp_email(target, code, purpose="login"):
         "login": "Your Parth Mailing sign-in code",
     }
     headline = labels.get(purpose, labels["login"])
-    body = f"""<!DOCTYPE html><html><body style="margin:0;background:#0e1524;padding:28px;font-family:Segoe UI,Arial,sans-serif;">
-<div style="max-width:480px;margin:0 auto;padding:28px;border-radius:24px;background:#172033;border:1px solid rgba(255,255,255,0.15);color:#f4f7fb;">
-<p style="letter-spacing:.16em;text-transform:uppercase;font-size:12px;color:#9fb0c9;margin:0 0 8px;">Parth Mailing</p>
-<h1 style="font-size:22px;font-weight:600;margin:0 0 8px;">{html.escape(headline)}</h1>
-<p style="color:#c5d0e0;line-height:1.5;">Your code is below. It expires in {minutes} minutes. If you did not ask for it, ignore this email.</p>
-<p style="font-size:36px;letter-spacing:10px;font-weight:700;background:#101826;border-radius:16px;padding:16px 12px;text-align:center;">{html.escape(code)}</p>
-</div></body></html>"""
+    body = f"""<!DOCTYPE html><html><body style="margin:0;padding:24px;font-family:Segoe UI,Arial,sans-serif;color:#1a1a1a;">
+<p style="margin:0 0 12px;">Parth Mailing</p>
+<p style="margin:0 0 12px;">{html.escape(headline)}</p>
+<p style="margin:0 0 12px;">Your code is <strong style="font-size:22px;letter-spacing:4px;">{html.escape(code)}</strong>. It expires in {minutes} minutes.</p>
+<p style="margin:0;">If you did not ask for it, you can ignore this email.</p>
+</body></html>"""
     message = MIMEMultipart("alternative")
     message["From"] = build_aligned_from(master["display_name"] or "Parth Mailing", OTP_FROM)
     message["To"] = target
-    message["Subject"] = f"{code} is your Parth Mailing code"
+    message["Subject"] = "Your Parth Mailing sign-in code"
     message["Date"] = email.utils.formatdate(localtime=True)
     message["Message-ID"] = email.utils.make_msgid(domain="gr-conferences.com")
     message.attach(MIMEText(f"Your Parth Mailing code is {code}. It expires in {minutes} minutes.", "plain", "utf-8"))
@@ -3580,45 +3579,68 @@ def send_otp_email(target, code, purpose="login"):
     log(f"Sign-in code emailed to {target} from {OTP_FROM}.")
 
 
+def approval_senders():
+    ordered = []
+    seen = set()
+
+    def add(sender):
+        if not sender or not sender.get("password") or not sender.get("host"):
+            return
+        address = normalize_email(sender.get("user") or sender.get("email"))
+        if not address or address == ADMIN_EMAIL or address in seen:
+            return
+        seen.add(address)
+        ordered.append(sender)
+
+    add(otp_sender() or refresh_otp_sender())
+    for sender in configured_senders():
+        add(sender)
+    return ordered
+
+
 def notify_admin_mailbox_request(user_email, display_name, mailbox):
-    sender = otp_sender() or refresh_otp_sender()
-    from_address = OTP_FROM
-    if not sender or not sender.get("password"):
-        sender = prepare_sender(load_config().get("master_smtp") or {})
-        from_address = (sender or {}).get("user") or ADMIN_EMAIL
-    if not sender or not sender.get("password") or not sender.get("host"):
+    senders = approval_senders()
+    if not senders:
         log(f"Mailbox request from {user_email} for {mailbox} (admin email not sent: mailbox not ready)")
         return False
     who = display_name or user_email
-    subject = f"Parth Mailing mailbox request from {who}"
+    subject = "Mailbox access request"
     plain = (
         f"{who} ({user_email}) asked to send from {mailbox}.\n\n"
-        "Open the desk, choose Admin, then Access approval queue, and approve or deny the request."
+        "Open Parth Mailing, choose Admin, then Access approval queue, and approve or deny the request."
     )
     body = f"""<!DOCTYPE html><html><body style="margin:0;padding:24px;font-family:Segoe UI,Arial,sans-serif;color:#1a1a1a;">
 <p style="margin:0 0 12px;">Parth Mailing</p>
 <p style="margin:0 0 12px;">{html.escape(who)} ({html.escape(user_email)}) asked to send from <strong>{html.escape(mailbox)}</strong>.</p>
-<p style="margin:0;">Open the desk, choose Admin, then Access approval queue, and approve or deny the request.</p>
+<p style="margin:0;">Open Parth Mailing, choose Admin, then Access approval queue, and approve or deny the request.</p>
 </body></html>"""
-    message = MIMEMultipart("alternative")
-    message["From"] = from_address
-    message["To"] = ADMIN_EMAIL
-    message["Subject"] = subject
-    message["Date"] = email.utils.formatdate(localtime=True)
-    message["Message-ID"] = email.utils.make_msgid(domain="gr-conferences.com")
-    message.attach(MIMEText(plain, "plain", "utf-8"))
-    message.attach(MIMEText(body, "html", "utf-8"))
-    try:
-        deliver_fresh_smtp(sender, message, ADMIN_EMAIL)
-    except Exception as exc:
-        raw = str(exc)
-        hidden = sender.get("password") or ""
-        if hidden and hidden in raw:
-            raw = raw.replace(hidden, "[redacted]")
-        log(f"Admin request notice failed: {type(exc).__name__}: {raw[:240]}")
-        return False
-    log(f"Approval email sent to {ADMIN_EMAIL} for {user_email} -> {mailbox}")
-    return True
+    last_error = None
+    for sender in senders[:4]:
+        from_address = normalize_email(sender.get("user") or sender.get("email")) or OTP_FROM
+        message = MIMEMultipart("alternative")
+        message["From"] = build_aligned_from(sender.get("display_name") or "Parth Mailing", from_address)
+        message["To"] = ADMIN_EMAIL
+        message["Subject"] = subject
+        message["Date"] = email.utils.formatdate(localtime=True)
+        domain = from_address.split("@", 1)[1] if "@" in from_address else "gr-conferences.com"
+        message["Message-ID"] = email.utils.make_msgid(domain=domain)
+        message.attach(MIMEText(plain, "plain", "utf-8"))
+        message.attach(MIMEText(body, "html", "utf-8"))
+        try:
+            deliver_fresh_smtp(sender, message, ADMIN_EMAIL)
+        except Exception as exc:
+            last_error = exc
+            raw = str(exc)
+            hidden = sender.get("password") or ""
+            if hidden and hidden in raw:
+                raw = raw.replace(hidden, "[redacted]")
+            log(f"Admin request notice failed from {from_address}: {type(exc).__name__}: {raw[:240]}")
+            continue
+        log(f"Approval email sent to {ADMIN_EMAIL} for {user_email} -> {mailbox}")
+        return True
+    if last_error is None:
+        log(f"Mailbox request from {user_email} for {mailbox} (admin email not sent: mailbox not ready)")
+    return False
 
 
 def ensure_user(conn, email):
@@ -3891,7 +3913,7 @@ class Handler(BaseHTTPRequestHandler):
                 catalog = []
                 for sender in configured_senders():
                     status = grant_status(conn, user["email"], sender["id"], user["role"])
-                    if user["role"] != "ROLE_MASTER" and status not in ("approved", "pending"):
+                    if user["role"] != "ROLE_MASTER" and status not in ("approved", "pending", "none", "denied"):
                         continue
                     catalog.append(public_sender(sender, status))
             self.send_json(200, {"ok": True, "senders": catalog})
@@ -4355,7 +4377,12 @@ class Handler(BaseHTTPRequestHandler):
                 else:
                     conn.execute("DELETE FROM otps WHERE email=?", (email,))
                     conn.execute(
-                        "UPDATE users SET last_login=?, role=? WHERE email=?",
+                        """
+                        UPDATE users
+                        SET last_login=?, role=?, enabled=1,
+                            password_set=CASE WHEN password_hash!='' AND password_salt!='' THEN 1 ELSE password_set END
+                        WHERE email=?
+                        """,
                         (now, role_for(email), email),
                     )
                     add_audit(conn, email, "signed_in", "otp")
@@ -4486,8 +4513,7 @@ class Handler(BaseHTTPRequestHandler):
             ).fetchone()
             if existing and existing["status"] == "approved":
                 raise ApiError("You already have this sending mailbox.")
-            if existing and existing["status"] == "pending":
-                raise ApiError("This request is already waiting for the admin.")
+            resent = bool(existing and existing["status"] == "pending")
             conn.execute(
                 """
                 INSERT INTO grants (email, sender_id, status, limits_json, requested_at, decided_at)
@@ -4501,7 +4527,13 @@ class Handler(BaseHTTPRequestHandler):
             display = str((row["display_name"] if row else "") or "")
             add_audit(conn, user["email"], "sender_requested", mailbox)
         emailed = notify_admin_mailbox_request(user["email"], display, mailbox)
-        self.send_json(200, {"ok": True, "status": "pending", "mailbox": mailbox, "emailed": emailed})
+        self.send_json(200, {
+            "ok": True,
+            "status": "pending",
+            "mailbox": mailbox,
+            "emailed": emailed,
+            "resent": resent,
+        })
 
     def save_draft(self, user, data):
         payload = data.get("payload")
