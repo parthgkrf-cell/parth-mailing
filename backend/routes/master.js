@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 const { get, all, run } = require('../database');
 const { requireMaster } = require('../middleware/auth');
+const { verifyAccountConnection } = require('../services/mailer');
+const { normalizeSyncUrl, bumpRevision, syncAccountsOnce, getAccountFeed } = require('../services/accountSync');
 
 // Apply master restriction to all routes in this router
 router.use(requireMaster);
@@ -149,18 +151,101 @@ router.post('/settings', async (req, res) => {
       return res.status(400).json({ error: 'Invalid settings payload.' });
     }
 
+    const allowed = {
+      app_name: (value) => String(value).trim().slice(0, 80) || 'Parth mailing',
+      gmail_max_daily_limit: (value) => String(Math.min(500, Math.max(50, Number(value) || 450))),
+      min_interval_seconds: (value) => String(Math.min(120, Math.max(5, Number(value) || 15))),
+      default_jitter_seconds: (value) => String(Math.min(60, Math.max(0, Number(value) || 8))),
+      require_user_approval: (value) => (String(value) === '1' || String(value) === 'true' ? '1' : '0'),
+      enforce_unsubscribe_header: (value) => (String(value) === '1' || String(value) === 'true' ? '1' : '0'),
+      support_email: (value) => String(value).trim().slice(0, 120),
+      accounts_sync_enabled: (value) => (String(value) === '1' || String(value) === 'true' ? '1' : '0'),
+      accounts_sync_url: (value) => {
+        const url = String(value || '').trim().slice(0, 500);
+        if (!url) return '';
+        return normalizeSyncUrl(url);
+      }
+    };
+
+    if (Object.prototype.hasOwnProperty.call(settings, 'accounts_sync_url')) {
+      try {
+        allowed.accounts_sync_url(settings.accounts_sync_url);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+    }
+
     for (const [key, value] of Object.entries(settings)) {
+      if (!allowed[key]) continue;
       await run(`
         INSERT INTO system_settings (key, value)
         VALUES (?, ?)
         ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `, [key, String(value)]);
+      `, [key, allowed[key](value)]);
     }
 
     res.json({ message: 'System settings updated successfully!' });
   } catch (err) {
     console.error('Settings update error:', err);
     res.status(500).json({ error: 'Failed to update system settings.' });
+  }
+});
+
+router.post('/accounts/test-all', async (req, res) => {
+  try {
+    const accounts = await all('SELECT * FROM smtp_accounts ORDER BY email COLLATE NOCASE');
+    const results = [];
+    for (const account of accounts) {
+      const result = await verifyAccountConnection(account);
+      if (result.success) {
+        await run('UPDATE smtp_accounts SET status = "ready", error_message = NULL WHERE id = ?', [account.id]);
+        results.push({
+          id: account.id,
+          email: account.email,
+          label: account.label,
+          working: true,
+          reason: account.is_active
+            ? 'Login succeeded. This mailbox can send.'
+            : 'Login succeeded, but the mailbox is switched off, so campaigns skip it.'
+        });
+      } else {
+        await run('UPDATE smtp_accounts SET status = "error", error_message = ? WHERE id = ?', [result.error, account.id]);
+        results.push({
+          id: account.id,
+          email: account.email,
+          label: account.label,
+          working: false,
+          reason: result.error
+        });
+      }
+    }
+    await bumpRevision();
+    res.json({
+      tested: results.length,
+      working: results.filter((item) => item.working).length,
+      failing: results.filter((item) => !item.working).length,
+      results
+    });
+  } catch (err) {
+    console.error('Mailbox test error:', err);
+    res.status(500).json({ error: 'Failed to test mailboxes.' });
+  }
+});
+
+router.post('/accounts/sync-now', async (req, res) => {
+  try {
+    const outcome = await syncAccountsOnce();
+    const feed = await getAccountFeed();
+    if (outcome.skipped) {
+      return res.status(400).json({ error: 'Turn mailbox sync on and save a Drive or GitHub link first.', ...feed });
+    }
+    if (!outcome.ok) {
+      return res.status(400).json({ error: outcome.error, ...feed });
+    }
+    res.json({ message: outcome.summary, warning: outcome.warning || '', ...feed });
+  } catch (err) {
+    console.error('Manual mailbox sync error:', err);
+    res.status(500).json({ error: 'Failed to fetch the mailbox file.' });
   }
 });
 
@@ -175,7 +260,8 @@ router.get('/accounts', async (req, res) => {
       JOIN users u ON a.user_id = u.id
       ORDER BY a.id DESC
     `);
-    res.json({ accounts });
+    const feed = await getAccountFeed();
+    res.json({ accounts, ...feed });
   } catch (err) {
     res.status(500).json({ error: 'Failed to fetch system accounts.' });
   }
@@ -231,6 +317,7 @@ router.put('/users/:id/accounts', async (req, res) => {
         [user.id, accountId]
       );
     }
+    await bumpRevision();
     res.json({ message: 'Sending accounts assigned.', account_ids: ids });
   } catch (err) {
     console.error('Assignment error:', err);

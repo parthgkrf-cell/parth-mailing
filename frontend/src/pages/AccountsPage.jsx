@@ -25,20 +25,24 @@ export default function AccountsPage() {
   // Action status per account
   const [testingId, setTestingId] = useState(null);
   const [testResult, setTestResult] = useState({});
+  const [feed, setFeed] = useState(null);
 
   useEffect(() => {
-    loadAccounts();
+    loadAccounts(false);
+    const timer = setInterval(() => loadAccounts(true), 5000);
+    return () => clearInterval(timer);
   }, []);
 
-  const loadAccounts = async () => {
+  const loadAccounts = async (quiet = false) => {
     try {
-      setLoading(true);
+      if (!quiet) setLoading(true);
       const res = await api.getAccounts();
       setAccounts(res.accounts || []);
+      setFeed(res);
     } catch (err) {
       console.error('Failed to load accounts:', err);
     } finally {
-      setLoading(false);
+      if (!quiet) setLoading(false);
     }
   };
 
@@ -127,8 +131,9 @@ export default function AccountsPage() {
             <Mail className="w-6 h-6 text-indigo-400" />
             Connected Gmail Accounts
           </h2>
-          <p className="text-slate-400 text-sm">
+          <p className="text-slate-300 text-sm">
             Manage your Google accounts, 16-digit App Passcodes, and monitor daily quotas.
+            {feed?.sync_enabled ? ` Live sync: ${feed.sync_status || 'waiting for the Drive or GitHub file.'}` : ' This list refreshes every few seconds.'}
           </p>
         </div>
 

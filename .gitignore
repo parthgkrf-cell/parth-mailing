@@ -6,11 +6,14 @@ dist/
 build/
 *.spec
 *.db
+*.db-shm
+*.db-wal
 .env
 .env.*
 *.log
 config/config.json
 config/drive_service_account.json
+config/accounts.sync.json
 *.xlsx
 !frontend/xlsx.js
 Thumbs.db

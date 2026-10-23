@@ -43,7 +43,14 @@ export default function ImportExcelPage({ setActiveTab }) {
           </div>
         </div>
 
-        <label className="block border-2 border-dashed border-slate-700 hover:border-indigo-500 rounded-2xl p-10 text-center cursor-pointer bg-slate-950/40">
+        <label
+          className="block border-2 border-dashed border-slate-700 hover:border-indigo-500 rounded-2xl p-10 text-center cursor-pointer bg-slate-950/40"
+          onDragOver={(e) => e.preventDefault()}
+          onDrop={(e) => {
+            e.preventDefault();
+            handleFiles(e.dataTransfer.files);
+          }}
+        >
           <Upload className="w-10 h-10 text-indigo-400 mx-auto mb-3" />
           <div className="text-white font-semibold">{busy ? 'Reading files…' : 'Drop Excel / CSV here or browse'}</div>
           <p className="text-xs text-slate-500 mt-2">Columns: Name, Email, Template, Sender Email, Sender Name</p>
@@ -52,7 +59,10 @@ export default function ImportExcelPage({ setActiveTab }) {
             multiple
             accept=".xlsx,.xls,.csv"
             className="hidden"
-            onChange={(e) => handleFiles(e.target.files)}
+            onChange={(e) => {
+              handleFiles(e.target.files);
+              e.target.value = '';
+            }}
           />
         </label>
 

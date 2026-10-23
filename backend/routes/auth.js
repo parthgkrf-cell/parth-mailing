@@ -19,6 +19,9 @@ router.post('/register', async (req, res) => {
     }
 
     const cleanEmail = email.toLowerCase().trim();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail)) {
+      return res.status(400).json({ error: 'Enter a valid email address.' });
+    }
 
     // Check duplicate
     const existing = await get('SELECT id FROM users WHERE email = ?', [cleanEmail]);

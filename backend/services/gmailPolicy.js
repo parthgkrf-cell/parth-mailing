@@ -28,14 +28,25 @@ function checkAndResetDailyQuota(account) {
 /**
  * Pre-flight compliance validator for an email before scheduling or sending
  */
+function asText(value) {
+  return value == null ? '' : String(value);
+}
+
 function validateGmailCompliance(payload) {
   const issues = [];
   const warnings = [];
-
-  const { subject = '', body_html = '', body_text = '', recipients = [] } = payload;
+  const source = payload || {};
+  const subject = asText(source.subject);
+  const body_html = asText(source.body_html);
+  const body_text = asText(source.body_text);
+  const recipients = Array.isArray(source.recipients) ? source.recipients.map(asText) : [];
 
   if (!subject.trim()) {
     issues.push('Subject line is required.');
+  }
+
+  if (!body_html.trim() && !body_text.trim()) {
+    issues.push('Message body is required.');
   }
 
   // Check all-caps subject
@@ -89,8 +100,9 @@ function validateGmailCompliance(payload) {
  * Calculates human-like pacing delay to avoid Google burst-detection triggers
  */
 function calculateSafeDelay(baseIntervalSec = 15, jitterSec = 8) {
-  const baseMs = Math.max(5, baseIntervalSec) * 1000;
-  const randomJitterMs = Math.floor(Math.random() * (Math.max(1, jitterSec) * 1000));
+  const baseMs = Math.max(5, Number(baseIntervalSec) || 15) * 1000;
+  const jitter = Math.max(0, Number(jitterSec) || 0);
+  const randomJitterMs = jitter === 0 ? 0 : Math.floor(Math.random() * (jitter * 1000));
   return baseMs + randomJitterMs;
 }
 

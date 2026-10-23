@@ -1,0 +1,17 @@
+{
+  "authoritative": true,
+  "accounts": [
+    {
+      "label": "Conference desk",
+      "email": "desk@example.com",
+      "app_password": "paste-the-16-character-app-password",
+      "from_name": "Conference Desk",
+      "host": "smtp.gmail.com",
+      "port": 465,
+      "secure": 1,
+      "daily_limit": 450,
+      "is_active": true,
+      "assigned_to": ["staff@example.com"]
+    }
+  ]
+}

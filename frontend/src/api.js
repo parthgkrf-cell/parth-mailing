@@ -71,6 +71,8 @@ export const api = {
   getMasterSettings: () => request('/master/settings'),
   updateMasterSettings: (settings) => request('/master/settings', { method: 'POST', body: JSON.stringify({ settings }) }),
   getMasterAccounts: () => request('/master/accounts'),
+  testAllAccounts: () => request('/master/accounts/test-all', { method: 'POST' }),
+  syncAccountsNow: () => request('/master/accounts/sync-now', { method: 'POST' }),
   getMasterLogs: (limit = 200) => request(`/master/logs?limit=${limit}`)
 };
 

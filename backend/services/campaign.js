@@ -121,11 +121,12 @@ async function listSendableAccounts(user) {
 
 async function resolveSendableAccount(user, accountId, senderHint) {
   const allowed = await listSendableAccounts(user);
+  const hint = String(senderHint || '').trim().toLowerCase();
   if (accountId) {
     const match = allowed.find((item) => Number(item.id) === Number(accountId));
     if (match) return match;
+    if (!hint) return null;
   }
-  const hint = String(senderHint || '').trim().toLowerCase();
   if (hint) {
     const byEmail = allowed.find((item) => String(item.email).toLowerCase() === normalizeEmail(hint));
     if (byEmail) return byEmail;
@@ -133,6 +134,7 @@ async function resolveSendableAccount(user, accountId, senderHint) {
     if (byLabel) return byLabel;
     const byName = allowed.find((item) => String(item.from_name || '').toLowerCase() === hint);
     if (byName) return byName;
+    return null;
   }
   return allowed[0] || null;
 }

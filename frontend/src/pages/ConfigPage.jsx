@@ -1,8 +1,10 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { api } from '../api';
+import { useAuth } from '../context/AuthContext';
 import { Link2, Copy, CheckCircle } from 'lucide-react';
 
 export default function ConfigPage() {
+  const { isMaster } = useAuth();
   const [tracking, setTracking] = useState({
     enabled: true,
     source: 'ParthMailing',
@@ -13,10 +15,16 @@ export default function ConfigPage() {
   });
   const [preview, setPreview] = useState('');
   const [status, setStatus] = useState('');
+  const trackingRef = useRef(tracking);
+
+  const updateTracking = (next) => {
+    trackingRef.current = next;
+    setTracking(next);
+  };
 
   const refresh = async () => {
     const res = await api.getGa4();
-    setTracking(res.tracking);
+    updateTracking(res.tracking);
     setPreview(res.preview);
   };
 
@@ -25,29 +33,16 @@ export default function ConfigPage() {
   }, []);
 
   const save = async (next) => {
-    const payload = next || tracking;
-    setTracking(payload);
-    const res = await api.saveGa4(payload);
-    setTracking(res.tracking);
-    setPreview(res.preview);
-    setStatus('GA4 tags saved.');
-  };
-
-  const tagTemplateLinks = async () => {
-    const templates = await api.getTemplates();
-    const list = templates.templates || [];
-    for (const template of list) {
-      const tagged = String(template.body_html || '').replace(/href=(["'])(https?:\/\/[^"']+)\1/gi, (match, quote, url) => {
-        const taggedUrl = preview && tracking.sampleUrl ? url : url;
-        return match.replace(url, taggedUrl);
-      });
-      if (tagged !== template.body_html) {
-        await api.updateTemplate(template.id, { ...template, body_html: tagged });
-      }
+    if (!isMaster) {
+      setStatus('Only Master Admin can change GA4 tracking.');
+      return;
     }
-    const res = await api.saveGa4(tracking);
+    const payload = next || trackingRef.current;
+    updateTracking(payload);
+    const res = await api.saveGa4(payload);
+    updateTracking(res.tracking);
     setPreview(res.preview);
-    setStatus('Current templates will receive these tags on send. Saved tracker.');
+    setStatus('GA4 tags saved. They are added to website links when a message is sent.');
   };
 
   return (
@@ -66,7 +61,12 @@ export default function ConfigPage() {
           <input
             type="checkbox"
             checked={tracking.enabled}
-            onChange={(e) => save({ ...tracking, enabled: e.target.checked })}
+            disabled={!isMaster}
+            onChange={(e) => {
+              const next = { ...trackingRef.current, enabled: e.target.checked };
+              updateTracking(next);
+              save(next);
+            }}
           />
           Add these tags to every website link when an email is sent
         </label>
@@ -81,10 +81,10 @@ export default function ConfigPage() {
             <label key={key} className="text-xs text-slate-400 font-semibold">
               {label}
               <input
-                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+                className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-60"
                 value={tracking[key] || ''}
-                onChange={(e) => setTracking({ ...tracking, [key]: e.target.value })}
-                onBlur={() => save(tracking)}
+                disabled={!isMaster}
+                onChange={(e) => updateTracking({ ...trackingRef.current, [key]: e.target.value })}
               />
             </label>
           ))}
@@ -93,10 +93,10 @@ export default function ConfigPage() {
         <label className="block text-xs text-slate-400 font-semibold mt-4">
           Link to track
           <input
-            className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white"
+            className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-white disabled:opacity-60"
             value={tracking.sampleUrl || ''}
-            onChange={(e) => setTracking({ ...tracking, sampleUrl: e.target.value })}
-            onBlur={() => save(tracking)}
+            disabled={!isMaster}
+            onChange={(e) => updateTracking({ ...trackingRef.current, sampleUrl: e.target.value })}
           />
         </label>
 
@@ -111,18 +111,20 @@ export default function ConfigPage() {
           >
             <Copy className="w-3.5 h-3.5" /> Copy tracked link
           </button>
-          <button
-            type="button"
-            onClick={() => tagTemplateLinks().catch((err) => setStatus(err.message))}
-            className="px-3 py-2 bg-slate-800 text-slate-200 text-xs font-semibold rounded-lg"
-          >
-            Save tracker for outgoing mail
-          </button>
+          {isMaster && (
+            <button
+              type="button"
+              onClick={() => save().catch((err) => setStatus(err.message))}
+              className="px-3 py-2 bg-slate-800 text-slate-200 text-xs font-semibold rounded-lg"
+            >
+              Save tracker for outgoing mail
+            </button>
+          )}
         </div>
 
         <code className="block mt-4 text-xs break-all bg-slate-950 border border-slate-800 rounded-lg p-3 text-emerald-300">{preview}</code>
         {status && (
-          <p className="text-emerald-400 text-xs mt-3 flex items-center gap-1">
+          <p className={`text-xs mt-3 flex items-center gap-1 ${status.toLowerCase().includes('only master') || status.toLowerCase().includes('fail') ? 'text-red-400' : 'text-emerald-400'}`}>
             <CheckCircle className="w-3.5 h-3.5" /> {status}
           </p>
         )}

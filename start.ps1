@@ -12,7 +12,7 @@ Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$sc
 Start-Process powershell -ArgumentList "-NoExit", "-Command", "Set-Location '$scriptDir\frontend'; npm.cmd run dev"
 
 Write-Host "Backend running on http://localhost:5000" -ForegroundColor Green
-Write-Host "Frontend running on http://localhost:3000" -ForegroundColor Green
-Write-Host "Master Login: master@parthmailing.com / MasterParth@2026" -ForegroundColor Magenta
+Write-Host "Frontend running on http://127.0.0.1:5173" -ForegroundColor Green
+Write-Host "Sign in with the master account, then change that password." -ForegroundColor Magenta
 Write-Host "========================================================" -ForegroundColor Cyan
 

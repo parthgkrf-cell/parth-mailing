@@ -30,9 +30,9 @@ export default function LogsPage() {
     if (search.trim()) {
       const q = search.toLowerCase();
       return (
-        l.recipient.toLowerCase().includes(q) ||
-        (l.subject && l.subject.toLowerCase().includes(q)) ||
-        (l.sender_email && l.sender_email.toLowerCase().includes(q))
+        String(l.recipient || '').toLowerCase().includes(q) ||
+        String(l.subject || '').toLowerCase().includes(q) ||
+        String(l.sender_email || '').toLowerCase().includes(q)
       );
     }
     return true;

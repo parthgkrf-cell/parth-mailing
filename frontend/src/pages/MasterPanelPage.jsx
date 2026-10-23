@@ -23,8 +23,12 @@ export default function MasterPanelPage() {
   const [defaultJitter, setDefaultJitter] = useState('10');
   const [requireApproval, setRequireApproval] = useState('0');
   const [enforceUnsub, setEnforceUnsub] = useState('1');
+  const [syncEnabled, setSyncEnabled] = useState('0');
+  const [syncUrl, setSyncUrl] = useState('');
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsStatus, setSettingsStatus] = useState('');
+  const [testingAll, setTestingAll] = useState(false);
+  const [testReport, setTestReport] = useState(null);
   const [assignUser, setAssignUser] = useState(null);
   const [assignableAccounts, setAssignableAccounts] = useState([]);
   const [selectedAccountIds, setSelectedAccountIds] = useState([]);
@@ -33,6 +37,16 @@ export default function MasterPanelPage() {
     if (!isMaster) return;
     loadMasterData();
   }, [subTab, isMaster]);
+
+  useEffect(() => {
+    if (!isMaster || subTab !== 'fleet') return undefined;
+    const timer = setInterval(() => {
+      api.getMasterAccounts()
+        .then((res) => setFleetAccounts(res.accounts || []))
+        .catch(() => {});
+    }, 5000);
+    return () => clearInterval(timer);
+  }, [isMaster, subTab]);
 
   const loadMasterData = async () => {
     try {
@@ -52,6 +66,8 @@ export default function MasterPanelPage() {
         setDefaultJitter(settingsRes.settings.default_jitter_seconds || '10');
         setRequireApproval(settingsRes.settings.require_user_approval || '0');
         setEnforceUnsub(settingsRes.settings.enforce_unsubscribe_header || '1');
+        setSyncEnabled(settingsRes.settings.accounts_sync_enabled || '0');
+        setSyncUrl(settingsRes.settings.accounts_sync_url || '');
       }
 
       if (subTab === 'users') {
@@ -143,7 +159,9 @@ export default function MasterPanelPage() {
         min_interval_seconds: minInterval,
         default_jitter_seconds: defaultJitter,
         require_user_approval: requireApproval,
-        enforce_unsubscribe_header: enforceUnsub
+        enforce_unsubscribe_header: enforceUnsub,
+        accounts_sync_enabled: syncEnabled,
+        accounts_sync_url: syncUrl
       });
       setSettingsStatus('Settings and global policies updated successfully!');
       setTimeout(() => setSettingsStatus(''), 3000);
@@ -151,6 +169,37 @@ export default function MasterPanelPage() {
       setSettingsStatus(`Error: ${err.message}`);
     } finally {
       setSavingSettings(false);
+    }
+  };
+
+  const handleTestAll = async () => {
+    setTestingAll(true);
+    setTestReport(null);
+    try {
+      const res = await api.testAllAccounts();
+      setTestReport(res);
+      const fleet = await api.getMasterAccounts();
+      setFleetAccounts(fleet.accounts || []);
+    } catch (err) {
+      setTestReport({ error: err.message || 'Mailbox test failed.' });
+    } finally {
+      setTestingAll(false);
+    }
+  };
+
+  const handleFetchSync = async () => {
+    setSettingsStatus('');
+    try {
+      await api.updateMasterSettings({
+        accounts_sync_enabled: '1',
+        accounts_sync_url: syncUrl
+      });
+      setSyncEnabled('1');
+      const res = await api.syncAccountsNow();
+      setSettingsStatus(res.warning ? `${res.message} ${res.warning}` : res.message);
+      loadMasterData();
+    } catch (err) {
+      setSettingsStatus(`Error: ${err.message}`);
     }
   };
 
@@ -244,7 +293,7 @@ export default function MasterPanelPage() {
           }`}
         >
           <Mail className="w-4 h-4" />
-          All Connected Accounts ({fleetAccounts.length})
+          All Connected Accounts ({stats ? stats.totalAccounts : fleetAccounts.length})
         </button>
 
         <button
@@ -370,13 +419,17 @@ export default function MasterPanelPage() {
             </p>
           </div>
 
-          {settingsStatus && (
+            {settingsStatus && (
             <div className={`p-3 rounded-xl text-xs flex items-center gap-2 ${
               settingsStatus.startsWith('Error') 
                 ? 'bg-red-950/60 border border-red-800 text-red-300' 
                 : 'bg-emerald-950/60 border border-emerald-800 text-emerald-300'
             }`}>
-              <CheckCircle className="w-4 h-4 shrink-0 text-emerald-400" />
+              {settingsStatus.startsWith('Error') ? (
+                <AlertTriangle className="w-4 h-4 shrink-0 text-red-400" />
+              ) : (
+                <CheckCircle className="w-4 h-4 shrink-0 text-emerald-400" />
+              )}
               <span>{settingsStatus}</span>
             </div>
           )}
@@ -465,6 +518,42 @@ export default function MasterPanelPage() {
               </select>
             </div>
 
+            <div className="md:col-span-2">
+              <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
+                Live mailbox file (Google Drive or GitHub)
+              </label>
+              <select
+                value={syncEnabled}
+                onChange={(e) => setSyncEnabled(e.target.value)}
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500 mb-2"
+              >
+                <option value="0">Off — mailboxes stay as saved in this app</option>
+                <option value="1">On — every user and admin refreshes from the link below</option>
+              </select>
+              <input
+                type="url"
+                value={syncUrl}
+                onChange={(e) => setSyncUrl(e.target.value)}
+                placeholder="https://drive.google.com/file/d/… or a GitHub raw link"
+                className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-2.5 text-sm text-white focus:outline-none focus:border-indigo-500"
+              />
+              <p className="text-[11px] text-slate-400 mt-1">
+                Put the mailbox JSON on Drive (share as anyone with the link) or in a private GitHub file. Do not commit passwords to a public repository. The sample shape is in config/accounts.sync.example.json. Changes show up for every signed-in person within a few seconds.
+              </p>
+              {settings.accounts_sync_status && (
+                <p className="text-[11px] text-slate-200 mt-2">
+                  Last fetch{settings.accounts_sync_checked_at ? ` (${new Date(settings.accounts_sync_checked_at).toLocaleString()})` : ''}: {settings.accounts_sync_status}
+                </p>
+              )}
+              <button
+                type="button"
+                onClick={handleFetchSync}
+                className="mt-2 px-3 py-1.5 bg-slate-800 text-slate-100 text-xs font-semibold rounded-lg"
+              >
+                Save link and fetch now
+              </button>
+            </div>
+
             {/* Google 2024 Unsubscribe Header */}
             <div>
               <label className="block text-xs font-semibold text-slate-300 uppercase tracking-wider mb-1.5">
@@ -497,10 +586,42 @@ export default function MasterPanelPage() {
       {/* Tab 3: Fleet Accounts */}
       {subTab === 'fleet' && (
         <div className="bg-slate-900/90 border border-slate-800 rounded-2xl shadow-xl overflow-hidden">
-          <div className="p-4 border-b border-slate-800 flex items-center justify-between">
-            <h3 className="font-bold text-white text-sm">Fleet-wide Connected Google Accounts</h3>
-            <span className="text-xs text-slate-400">Total: {fleetAccounts.length}</span>
+          <div className="p-4 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h3 className="font-bold text-white text-sm">Fleet-wide Connected Google Accounts</h3>
+              <p className="text-[11px] text-slate-300 mt-1">Super Admin check. Each mailbox is signed in over SMTP. A failure includes the reason.</p>
+            </div>
+            <div className="flex items-center gap-3">
+              <span className="text-xs text-slate-400">Total: {fleetAccounts.length}</span>
+              <button
+                type="button"
+                onClick={handleTestAll}
+                disabled={testingAll}
+                className="px-3 py-1.5 bg-indigo-600 disabled:opacity-50 text-white text-xs font-semibold rounded-lg"
+              >
+                {testingAll ? 'Testing mailboxes…' : 'Test all mailboxes'}
+              </button>
+            </div>
           </div>
+          {testReport && (
+            <div className="px-4 py-3 border-b border-slate-800 space-y-2">
+              {testReport.error ? (
+                <p className="text-sm text-red-300">{testReport.error}</p>
+              ) : (
+                <>
+                  <p className="text-sm text-slate-100">{testReport.working} working, {testReport.failing} not working, of {testReport.tested} tested.</p>
+                  <div className="space-y-1">
+                    {(testReport.results || []).map((item) => (
+                      <div key={item.id} className={`text-xs rounded-lg px-3 py-2 ${item.working ? 'bg-emerald-950/40 text-emerald-200' : 'bg-red-950/40 text-red-200'}`}>
+                        <span className="font-semibold">{item.label}</span> <span className="font-mono">{item.email}</span>
+                        <div>{item.working ? 'Working' : 'Not working'}: {item.reason}</div>
+                      </div>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
 
           <div className="overflow-x-auto">
             <table className="w-full text-left text-xs">
@@ -534,6 +655,9 @@ export default function MasterPanelPage() {
                       }`}>
                         {a.status}
                       </span>
+                      {a.error_message && (
+                        <div className="text-[10px] text-red-300 mt-1 max-w-[240px]">{a.error_message}</div>
+                      )}
                     </td>
                     <td className="py-3 px-4 text-slate-400">{a.port} ({a.secure ? 'SSL' : 'TLS'})</td>
                   </tr>

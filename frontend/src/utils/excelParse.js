@@ -4,10 +4,19 @@ function norm(value) {
   return String(value || '').replace(/^\uFEFF/, '').trim().toLowerCase();
 }
 
+function headerMatches(header, alias) {
+  const h = norm(header);
+  const a = norm(alias);
+  if (!h || !a || a.length < 3) return false;
+  if (h === a) return true;
+  const escaped = a.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9])${escaped}([^a-z0-9]|$)`).test(h);
+}
+
 function findCol(headers, aliases, exclude = new Set()) {
   const exact = headers.findIndex((header, index) => !exclude.has(index) && aliases.some((alias) => norm(header) === norm(alias)));
   if (exact >= 0) return exact;
-  return headers.findIndex((header, index) => !exclude.has(index) && aliases.some((alias) => norm(header).includes(norm(alias))));
+  return headers.findIndex((header, index) => !exclude.has(index) && aliases.some((alias) => headerMatches(header, alias)));
 }
 
 function cleanEmail(value) {
@@ -33,7 +42,6 @@ export function parseSheetMatrix(matrix, fileName = 'workbook', sheetName = 'She
   if (!matrix || !matrix.length) return { rows: [], invalid: 0 };
   const headers = (matrix[0] || []).map((cell) => String(cell || '').trim());
   const emailCol = findCol(headers, ['Email', 'Email Address', 'Mail', 'EmailID', 'Recipient Email', 'To Email']);
-  const nameCol = findCol(headers, ['Name', 'First Name', 'Recipient Name', 'Full Name', 'Contact Name']);
   const firstCol = findCol(headers, ['FirstName', 'First Name', 'Given Name']);
   const lastCol = findCol(headers, ['LastName', 'Last Name', 'Surname']);
   const companyCol = findCol(headers, ['Affiliation', 'Company', 'Organization', 'Aff']);
@@ -43,7 +51,12 @@ export function parseSheetMatrix(matrix, fileName = 'workbook', sheetName = 'She
   ]);
   const senderNameCol = findCol(headers, [
     'Sender Name', 'From Name', 'FromName', 'Display Name', 'Account Name', 'Sender Title'
-  ], new Set([senderCol, emailCol, nameCol].filter((i) => i >= 0)));
+  ], new Set([senderCol, emailCol].filter((i) => i >= 0)));
+  const nameCol = findCol(
+    headers,
+    ['Name', 'First Name', 'Recipient Name', 'Full Name', 'Contact Name'],
+    new Set([senderCol, senderNameCol, emailCol, firstCol, lastCol].filter((i) => i >= 0))
+  );
   const ccCol = findCol(headers, ['CC', 'Cc Email']);
   const bccCol = findCol(headers, ['BCC', 'Bcc Email']);
   const dateCol = findCol(headers, ['Date', 'S_Date', 'Send Date', 'Schedule Date']);

@@ -16,9 +16,15 @@ export function CampaignProvider({ children }) {
   }, []);
 
   const setRecipients = (next) => {
-    const rows = typeof next === 'function' ? next(recipients) : next;
-    setRecipientsState(rows);
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+    setRecipientsState((current) => {
+      const rows = typeof next === 'function' ? next(current) : next;
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+      } catch (err) {
+        console.error('Could not cache imported recipients:', err);
+      }
+      return rows;
+    });
   };
 
   const clearRecipients = () => setRecipients([]);

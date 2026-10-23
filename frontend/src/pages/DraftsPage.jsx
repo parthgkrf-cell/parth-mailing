@@ -2,6 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { api } from '../api';
 import { FileText, Send, Trash2, Edit3, Clock, AlertCircle } from 'lucide-react';
 
+function countRecipients(raw) {
+  if (!raw) return 0;
+  try {
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed.length;
+  } catch (err) {
+    // plain comma or newline list
+  }
+  return String(raw).split(/[,;\n]+/).filter((part) => part.includes('@')).length;
+}
+
 export default function DraftsPage({ onEditDraft }) {
   const [drafts, setDrafts] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -91,9 +102,9 @@ export default function DraftsPage({ onEditDraft }) {
                 </div>
               </div>
 
-              <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs">
+                <div className="flex items-center justify-between pt-3 border-t border-slate-800/80 text-xs">
                 <span className="text-slate-500">
-                  {draft.recipients ? `${draft.recipients.split(',').length} recipient(s)` : 'No recipients yet'}
+                  {countRecipients(draft.recipients) ? `${countRecipients(draft.recipients)} recipient(s)` : 'No recipients yet'}
                 </span>
 
                 <div className="flex items-center gap-2">

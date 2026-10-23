@@ -3,6 +3,14 @@ import { useCampaign } from '../context/CampaignContext';
 import { api } from '../api';
 import { Eye } from 'lucide-react';
 
+function sanitizePreviewHtml(html) {
+  return String(html || '')
+    .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
+    .replace(/<iframe[\s\S]*?>[\s\S]*?<\/iframe>/gi, '')
+    .replace(/\son\w+\s*=\s*(['"]).*?\1/gi, '')
+    .replace(/javascript:/gi, '');
+}
+
 export default function PreviewPage() {
   const { recipients } = useCampaign();
   const [templates, setTemplates] = useState([]);
@@ -12,8 +20,17 @@ export default function PreviewPage() {
   const [merged, setMerged] = useState(null);
 
   useEffect(() => {
-    api.getTemplates().then((res) => setTemplates(res.templates || [])).catch(() => {});
-    api.getAccounts().then((res) => setAccounts(res.accounts || [])).catch(() => {});
+    let stop = false;
+    const pull = () => {
+      api.getTemplates().then((res) => { if (!stop) setTemplates(res.templates || []); }).catch(() => {});
+      api.getAccounts().then((res) => { if (!stop) setAccounts(res.accounts || []); }).catch(() => {});
+    };
+    pull();
+    const timer = setInterval(pull, 5000);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
   }, []);
 
   useEffect(() => {
@@ -27,8 +44,9 @@ export default function PreviewPage() {
 
   const selectedTemplate = useMemo(() => {
     if (templateId) return templates.find((item) => String(item.id) === String(templateId));
-    if (!recipient) return templates[0];
-    return templates.find((item) => String(item.name).toLowerCase() === String(recipient.template || '').toLowerCase()) || templates[0];
+    const wanted = String(recipient?.template || '').trim().toLowerCase();
+    if (!wanted) return null;
+    return templates.find((item) => String(item.name).toLowerCase() === wanted) || null;
   }, [templates, templateId, recipient]);
 
   useEffect(() => {
@@ -36,38 +54,52 @@ export default function PreviewPage() {
       setMerged(null);
       return;
     }
+    let stop = false;
     api.previewMerge({
       subject: selectedTemplate.subject,
       body_html: selectedTemplate.body_html,
       recipient
-    }).then(setMerged).catch(() => setMerged({
-      subject: selectedTemplate.subject,
-      html: selectedTemplate.body_html,
-      from_name: recipient.sender_name
-    }));
+    }).then((res) => { if (!stop) setMerged(res); }).catch(() => {
+      if (!stop) {
+        setMerged({
+          subject: selectedTemplate.subject,
+          html: selectedTemplate.body_html,
+          from_name: recipient.sender_name
+        });
+      }
+    });
+    return () => { stop = true; };
   }, [recipient, selectedTemplate]);
 
   const account = accounts.find((item) =>
     String(item.email).toLowerCase() === String(recipient?.sender || '').toLowerCase()
     || String(item.label).toLowerCase() === String(recipient?.sender || '').toLowerCase()
   );
-  const fromName = recipient?.sender_name || account?.from_name || account?.label || 'Unassigned sender';
+  const fromName = recipient?.sender_name || merged?.from_name || account?.from_name || account?.label || 'Unassigned sender';
+  const fromEmail = account?.email || recipient?.sender || '';
 
   return (
-    <div className="space-y-4">
-      <div className="bg-slate-900 border border-slate-800 rounded-2xl p-4 flex flex-wrap gap-3 items-end">
-        <div className="flex-1 min-w-[200px]">
-          <label className="text-xs text-slate-400 font-semibold">Recipient</label>
-          <select value={recipientId} onChange={(e) => setRecipientId(e.target.value)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+    <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
+      <div className="px-4 py-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3 bg-slate-950/60">
+        <div className="flex items-center gap-2 text-indigo-300 font-semibold text-sm">
+          <Eye className="w-4 h-4" /> Preview
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <select
+            value={recipientId}
+            onChange={(e) => setRecipientId(e.target.value)}
+            className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-100 max-w-[280px]"
+          >
             {recipients.length === 0 && <option value="">Import Excel first</option>}
             {recipients.map((row) => (
               <option key={row.id} value={row.id}>{row.name || row.email} — {row.email}</option>
             ))}
           </select>
-        </div>
-        <div className="flex-1 min-w-[200px]">
-          <label className="text-xs text-slate-400 font-semibold">Template</label>
-          <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className="mt-1 w-full bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm">
+          <select
+            value={templateId}
+            onChange={(e) => setTemplateId(e.target.value)}
+            className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-slate-100"
+          >
             <option value="">Auto from Excel</option>
             {templates.map((item) => (
               <option key={item.id} value={item.id}>{item.name}</option>
@@ -77,22 +109,37 @@ export default function PreviewPage() {
       </div>
 
       {!recipient ? (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl p-12 text-center text-slate-400">
-          Import an Excel sheet, then pick a recipient to preview the campaign.
+        <div className="min-h-[36rem] flex items-center justify-center text-slate-300 text-sm px-6 text-center">
+          Import an Excel sheet, then pick a recipient. This window matches the Composer size.
         </div>
       ) : (
-        <div className="bg-slate-900 border border-slate-800 rounded-2xl overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-800 flex items-center gap-2 text-indigo-300 text-sm font-semibold">
-            <Eye className="w-4 h-4" /> Live preview
+        <>
+          <div className="divide-y divide-slate-800 text-sm">
+            <div className="px-4 py-2 flex gap-3">
+              <span className="w-24 text-slate-300 font-semibold">From</span>
+              <span className="text-slate-100">{fromName}{fromEmail ? ` <${fromEmail}>` : ''}</span>
+            </div>
+            <div className="px-4 py-2 flex gap-3">
+              <span className="w-24 text-slate-300 font-semibold">To</span>
+              <span className="text-slate-100">{recipient.name ? `${recipient.name} ` : ''}&lt;{recipient.email}&gt;</span>
+            </div>
+            <div className="px-4 py-2 flex gap-3">
+              <span className="w-24 text-slate-300 font-semibold">Template</span>
+              <span className="text-slate-100">
+                {selectedTemplate?.name || recipient.template || '—'}
+                {recipient.template && !selectedTemplate ? ' (no saved template with this name)' : ''}
+              </span>
+            </div>
+            <div className="px-4 py-2 flex gap-3">
+              <span className="w-24 text-slate-300 font-semibold">Subject</span>
+              <strong className="text-white">{merged?.subject || selectedTemplate?.subject || '(No subject)'}</strong>
+            </div>
           </div>
-          <div className="p-5 space-y-2 text-sm">
-            <div><span className="text-slate-500 w-20 inline-block">From</span> {fromName} {account ? `<${account.email}>` : recipient.sender ? `<${recipient.sender}>` : ''}</div>
-            <div><span className="text-slate-500 w-20 inline-block">To</span> {recipient.name} &lt;{recipient.email}&gt;</div>
-            <div><span className="text-slate-500 w-20 inline-block">Template</span> {selectedTemplate?.name || recipient.template || '—'}</div>
-            <div><span className="text-slate-500 w-20 inline-block">Subject</span> <strong>{merged?.subject || selectedTemplate?.subject || '(No subject)'}</strong></div>
-          </div>
-          <div className="bg-white text-slate-900 min-h-[280px] p-6" dangerouslySetInnerHTML={{ __html: merged?.html || '<p class="text-slate-400">Empty message</p>' }} />
-        </div>
+          <div
+            className="bg-white text-slate-900 min-h-[28rem] p-6 text-sm leading-relaxed"
+            dangerouslySetInnerHTML={{ __html: sanitizePreviewHtml(merged?.html) || '<p style="color:#64748b">Empty message</p>' }}
+          />
+        </>
       )}
     </div>
   );

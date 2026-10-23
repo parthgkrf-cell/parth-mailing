@@ -40,9 +40,17 @@ const all = (sql, params = []) => {
 };
 
 // Initialize schema
+async function getSetting(key, fallback = '') {
+  const row = await get('SELECT value FROM system_settings WHERE key = ?', [key]);
+  if (!row || row.value == null || row.value === '') return fallback;
+  return row.value;
+}
+
 const initDB = async () => {
   try {
     await run(`PRAGMA foreign_keys = ON`);
+    await run(`PRAGMA journal_mode = WAL`);
+    await run(`PRAGMA busy_timeout = 5000`);
 
     // Users table
     await run(`
@@ -131,6 +139,14 @@ const initDB = async () => {
       )
     `);
 
+    const draftCols = await all('PRAGMA table_info(drafts)');
+    if (!draftCols.some((col) => col.name === 'cc')) {
+      await run('ALTER TABLE drafts ADD COLUMN cc TEXT DEFAULT ""');
+    }
+    if (!draftCols.some((col) => col.name === 'bcc')) {
+      await run('ALTER TABLE drafts ADD COLUMN bcc TEXT DEFAULT ""');
+    }
+
     // Scheduled Emails table
     await run(`
       CREATE TABLE IF NOT EXISTS scheduled_emails (
@@ -194,7 +210,12 @@ const initDB = async () => {
       { key: 'ga4_utm_medium', value: 'email', description: 'GA4 utm_medium' },
       { key: 'ga4_utm_campaign', value: '101', description: 'GA4 utm_campaign' },
       { key: 'ga4_utm_content', value: '', description: 'GA4 utm_content' },
-      { key: 'ga4_sample_url', value: 'https://example.com/cfp.php#section06', description: 'Sample URL used to preview tracked links' }
+      { key: 'ga4_sample_url', value: 'https://example.com/cfp.php#section06', description: 'Sample URL used to preview tracked links' },
+      { key: 'accounts_sync_enabled', value: '0', description: 'Pull mailbox list from Drive or GitHub' },
+      { key: 'accounts_sync_url', value: '', description: 'https Drive or GitHub link to the mailbox JSON' },
+      { key: 'accounts_sync_status', value: 'Sync is off.', description: 'Last mailbox sync result' },
+      { key: 'accounts_sync_checked_at', value: '', description: 'Last mailbox sync time' },
+      { key: 'accounts_revision', value: '0', description: 'Increments when mailboxes change' }
     ];
 
     for (const s of defaultSettings) {
@@ -215,7 +236,7 @@ const initDB = async () => {
         INSERT INTO users (name, email, password_hash, role, is_active, is_approved)
         VALUES (?, ?, ?, 'master', 1, 1)
       `, ['Parth (Master Admin)', masterEmail, hash]);
-      console.log(`[Database] Master Admin account created: ${masterEmail} / ${defaultPassword}`);
+      console.log(`[Database] Master Admin account created for ${masterEmail}. Change the default password after first login.`);
     } else if (existingMaster.email !== masterEmail) {
       const taken = await get(`SELECT id FROM users WHERE email = ? AND id != ?`, [masterEmail, existingMaster.id]);
       if (taken) {
@@ -229,6 +250,7 @@ const initDB = async () => {
     console.log('[Database] Tables and initial configuration verified successfully.');
   } catch (err) {
     console.error('[Database] Initialization error:', err);
+    throw err;
   }
 };
 
@@ -237,6 +259,7 @@ module.exports = {
   run,
   get,
   all,
+  getSetting,
   initDB
 };
 

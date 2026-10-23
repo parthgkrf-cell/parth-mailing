@@ -11,4 +11,11 @@
     color: #e2e8f0;
     min-height: 100vh;
   }
+  button, input, select, textarea {
+    color: #f8fafc;
+    color-scheme: dark;
+  }
+  input::placeholder, textarea::placeholder {
+    color: #94a3b8;
+  }
 }

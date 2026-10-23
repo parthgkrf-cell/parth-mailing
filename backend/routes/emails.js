@@ -1,6 +1,6 @@
 const express = require('express');
 const router = express.Router();
-const { get, all, run } = require('../database');
+const { get, all, run, getSetting } = require('../database');
 const { requireAuth } = require('../middleware/auth');
 const { validateGmailCompliance } = require('../services/gmailPolicy');
 const { sendSingleEmail } = require('../services/mailer');
@@ -11,6 +11,7 @@ const {
   applyEmailTracking,
   loadGa4Settings,
   tagUrlForGa4,
+  listSendableAccounts,
   resolveSendableAccount
 } = require('../services/campaign');
 
@@ -33,7 +34,10 @@ router.get('/stats', requireAuth, async (req, res) => {
     const userId = req.user.id;
 
     // Accounts
-    const accounts = await all('SELECT sent_today, daily_limit FROM smtp_accounts WHERE user_id = ? AND is_active = 1', [userId]);
+    const visibleAccounts = req.user.role === 'master'
+      ? await all('SELECT sent_today, daily_limit, is_active FROM smtp_accounts')
+      : await listSendableAccounts(req.user);
+    const accounts = visibleAccounts.filter((account) => account.is_active);
     const totalSentToday = accounts.reduce((acc, cur) => acc + (cur.sent_today || 0), 0);
     const totalDailyQuota = accounts.reduce((acc, cur) => acc + (cur.daily_limit || 450), 0);
 
@@ -174,6 +178,9 @@ router.get('/ga4', requireAuth, async (req, res) => {
 
 router.post('/ga4', requireAuth, async (req, res) => {
   try {
+    if (req.user.role !== 'master') {
+      return res.status(403).json({ error: 'Only Master Admin can change GA4 tracking.' });
+    }
     const incoming = req.body.tracking || req.body;
     const tracking = {
       enabled: incoming.enabled !== false && incoming.enabled !== '0',
@@ -240,10 +247,10 @@ router.get('/drafts', requireAuth, async (req, res) => {
 
 router.post('/drafts', requireAuth, async (req, res) => {
   try {
-    const { title, subject, recipients, body_html, body_text, smtp_account_id } = req.body;
+    const { title, subject, recipients, body_html, body_text, smtp_account_id, cc, bcc } = req.body;
     const result = await run(
-      `INSERT INTO drafts (user_id, smtp_account_id, title, subject, recipients, body_html, body_text, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO drafts (user_id, smtp_account_id, title, subject, recipients, body_html, body_text, cc, bcc, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [
         req.user.id,
         smtp_account_id || null,
@@ -252,6 +259,8 @@ router.post('/drafts', requireAuth, async (req, res) => {
         recipients || '',
         body_html || '',
         body_text || '',
+        cc || '',
+        bcc || '',
         new Date().toISOString()
       ]
     );
@@ -266,18 +275,20 @@ router.put('/drafts/:id', requireAuth, async (req, res) => {
     const draft = await get('SELECT * FROM drafts WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
     if (!draft) return res.status(404).json({ error: 'Draft not found.' });
 
-    const { title, subject, recipients, body_html, body_text, smtp_account_id } = req.body;
+    const { title, subject, recipients, body_html, body_text, smtp_account_id, cc, bcc } = req.body;
     await run(
       `UPDATE drafts
-       SET title = ?, subject = ?, recipients = ?, body_html = ?, body_text = ?, smtp_account_id = ?, updated_at = ?
+       SET title = ?, subject = ?, recipients = ?, body_html = ?, body_text = ?, smtp_account_id = ?, cc = ?, bcc = ?, updated_at = ?
        WHERE id = ?`,
       [
-        title || draft.title,
+        title != null ? title : draft.title,
         subject !== undefined ? subject : draft.subject,
         recipients !== undefined ? recipients : draft.recipients,
         body_html !== undefined ? body_html : draft.body_html,
         body_text !== undefined ? body_text : draft.body_text,
         smtp_account_id !== undefined ? smtp_account_id : draft.smtp_account_id,
+        cc !== undefined ? cc : (draft.cc || ''),
+        bcc !== undefined ? bcc : (draft.bcc || ''),
         new Date().toISOString(),
         draft.id
       ]
@@ -331,6 +342,13 @@ router.post('/schedules', requireAuth, async (req, res) => {
       return res.status(400).json({ error: compliance.issues.join(' ') });
     }
 
+    if (smtp_account_id) {
+      const allowedAccount = await resolveSendableAccount(req.user, smtp_account_id, null);
+      if (!allowedAccount) {
+        return res.status(403).json({ error: 'That sending account is not assigned to you.' });
+      }
+    }
+
     if (!scheduled_for) {
       return res.status(400).json({ error: 'Scheduled time is required.' });
     }
@@ -340,9 +358,10 @@ router.post('/schedules', requireAuth, async (req, res) => {
       return res.status(400).json({ error: 'Invalid scheduled date/time.' });
     }
 
-    // Google compliance: Enforce safe interval (minimum 10 seconds)
-    const safeInterval = Math.max(10, Number(interval_seconds) || 15);
-    const safeJitter = Math.max(2, Number(random_jitter) || 8);
+    const minInterval = Math.min(120, Math.max(5, Number(await getSetting('min_interval_seconds', '15')) || 15));
+    const defaultJitter = Math.min(60, Math.max(0, Number(await getSetting('default_jitter_seconds', '8')) || 0));
+    const safeInterval = Math.max(minInterval, Number(interval_seconds) || minInterval);
+    const safeJitter = Math.max(0, Number.isFinite(Number(random_jitter)) ? Number(random_jitter) : defaultJitter);
 
     const result = await run(
       `INSERT INTO scheduled_emails (
@@ -352,7 +371,7 @@ router.post('/schedules', requireAuth, async (req, res) => {
       [
         req.user.id,
         smtp_account_id || null,
-        subject.trim(),
+        String(subject || '').trim(),
         JSON.stringify(recipientRows.length ? recipientRows : recipientList),
         recipientList.length,
         body_html,
@@ -378,7 +397,8 @@ router.post('/schedules', requireAuth, async (req, res) => {
 // Pause / Resume / Cancel Schedule
 router.put('/schedules/:id/pause', requireAuth, async (req, res) => {
   try {
-    await run('UPDATE scheduled_emails SET status = "paused" WHERE id = ? AND user_id = ? AND status IN ("scheduled", "sending")', [req.params.id, req.user.id]);
+    const result = await run('UPDATE scheduled_emails SET status = "paused" WHERE id = ? AND user_id = ? AND status IN ("scheduled", "sending")', [req.params.id, req.user.id]);
+    if (!result.changes) return res.status(409).json({ error: 'Schedule is not in a state that can be paused.' });
     res.json({ message: 'Schedule paused.' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to pause schedule.' });
@@ -387,7 +407,8 @@ router.put('/schedules/:id/pause', requireAuth, async (req, res) => {
 
 router.put('/schedules/:id/resume', requireAuth, async (req, res) => {
   try {
-    await run('UPDATE scheduled_emails SET status = "scheduled" WHERE id = ? AND user_id = ? AND status = "paused"', [req.params.id, req.user.id]);
+    const result = await run('UPDATE scheduled_emails SET status = "scheduled" WHERE id = ? AND user_id = ? AND status = "paused"', [req.params.id, req.user.id]);
+    if (!result.changes) return res.status(409).json({ error: 'Only a paused schedule can be resumed.' });
     res.json({ message: 'Schedule resumed.' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to resume schedule.' });
@@ -396,7 +417,8 @@ router.put('/schedules/:id/resume', requireAuth, async (req, res) => {
 
 router.delete('/schedules/:id', requireAuth, async (req, res) => {
   try {
-    await run('DELETE FROM scheduled_emails WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    const result = await run('DELETE FROM scheduled_emails WHERE id = ? AND user_id = ?', [req.params.id, req.user.id]);
+    if (!result.changes) return res.status(404).json({ error: 'Schedule not found.' });
     res.json({ message: 'Schedule deleted.' });
   } catch (err) {
     res.status(500).json({ error: 'Failed to delete schedule.' });
@@ -432,33 +454,55 @@ router.post('/send-now', requireAuth, async (req, res) => {
     const results = [];
     let lastAccount = null;
     for (const row of recipientRows) {
-      const template = templates.find((item) =>
-        String(item.name).toLowerCase() === String(row.template || '').toLowerCase()
-      );
+      const wantedTemplate = String(row.template || '').trim().toLowerCase();
+      const template = wantedTemplate
+        ? templates.find((item) => String(item.name).toLowerCase() === wantedTemplate)
+        : null;
       const mergedSubject = applyMerge(template ? template.subject : subject, row);
       const mergedHtml = applyEmailTracking(applyMerge(template ? template.body_html : body_html, row), tracking);
       const mergedText = applyMerge(template ? (template.body_html || '').replace(/<[^>]*>?/gm, ' ') : (body_text || ''), row);
-      const account = await resolveSendableAccount(req.user, row.smtp_account_id || smtp_account_id, row.sender);
+      const requestedAccount = row.smtp_account_id || smtp_account_id;
+      const account = await resolveSendableAccount(req.user, requestedAccount, row.sender);
       if (!account) {
-        return res.status(400).json({ error: 'No sending account assigned. Ask Master Admin to give you a mailbox.' });
+        results.push({
+          recipient: row.email,
+          success: false,
+          error: requestedAccount || row.sender
+            ? 'Sending account for this row is not assigned to you.'
+            : 'No sending account assigned. Ask Master Admin to give you a mailbox.'
+        });
+        continue;
       }
       lastAccount = account;
-      const resItem = await sendSingleEmail({
-        account,
-        recipient: row.email,
-        subject: mergedSubject,
-        bodyHtml: mergedHtml,
-        bodyText: mergedText,
-        userId: req.user.id,
-        fromName: row.sender_name || account.from_name || account.label,
-        cc: row.cc || (template && template.cc) || '',
-        bcc: row.bcc || (template && template.bcc) || ''
+      try {
+        const resItem = await sendSingleEmail({
+          account,
+          recipient: row.email,
+          subject: mergedSubject,
+          bodyHtml: mergedHtml,
+          bodyText: mergedText,
+          userId: req.user.id,
+          fromName: row.sender_name || account.from_name || account.label,
+          cc: row.cc || (template && template.cc) || '',
+          bcc: row.bcc || (template && template.bcc) || ''
+        });
+        results.push({ recipient: row.email, ...resItem });
+      } catch (sendErr) {
+        results.push({ recipient: row.email, success: false, error: sendErr.message });
+      }
+    }
+
+    const sentCount = results.filter((item) => item.success).length;
+    const failedCount = results.length - sentCount;
+    if (!sentCount) {
+      return res.status(400).json({
+        error: results[0]?.error || 'Failed to send email.',
+        results
       });
-      results.push({ recipient: row.email, ...resItem });
     }
 
     res.json({
-      message: `Successfully sent ${results.length} email(s)${lastAccount ? ` via ${lastAccount.email}` : ''}!`,
+      message: `Sent ${sentCount} email(s)${failedCount ? `, ${failedCount} failed` : ''}${lastAccount ? ` via ${lastAccount.email}` : ''}.`,
       results
     });
   } catch (err) {

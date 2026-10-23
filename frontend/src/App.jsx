@@ -22,6 +22,16 @@ export default function App() {
   const [activeTab, setActiveTab] = useState('dashboard');
   const [composerInitialData, setComposerInitialData] = useState(null);
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [appName, setAppName] = useState('Parth mailing');
+
+  useEffect(() => {
+    fetch('/api/health')
+      .then((res) => res.json())
+      .then((data) => {
+        if (data?.app) setAppName(data.app);
+      })
+      .catch(() => {});
+  }, []);
 
   useEffect(() => {
     if (!isMaster && (activeTab === 'master' || activeTab === 'accounts')) {
@@ -77,7 +87,7 @@ export default function App() {
                 <Mail className="w-5 h-5" />
               </div>
               <div>
-                <span className="font-extrabold text-white text-base tracking-tight">Parth mailing</span>
+                <span className="font-extrabold text-white text-base tracking-tight">{appName}</span>
                 <span className="text-[10px] block text-indigo-400 font-mono -mt-1">v1.0 Pro</span>
               </div>
             </div>

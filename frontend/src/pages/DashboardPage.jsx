@@ -1,11 +1,13 @@
 import React, { useState, useEffect } from 'react';
 import { api } from '../api';
+import { useAuth } from '../context/AuthContext';
 import { 
   Send, Calendar, FileText, ShieldCheck, Mail, CheckCircle, 
   AlertTriangle, Users, ArrowUpRight, Clock, PlusCircle
 } from 'lucide-react';
 
-export default function DashboardPage({ setActiveTab, setComposerInitialData }) {
+export default function DashboardPage({ setActiveTab }) {
+  const { isMaster } = useAuth();
   const [stats, setStats] = useState(null);
   const [accounts, setAccounts] = useState([]);
   const [recentSchedules, setRecentSchedules] = useState([]);
@@ -13,6 +15,8 @@ export default function DashboardPage({ setActiveTab, setComposerInitialData }) 
 
   useEffect(() => {
     loadDashboardData();
+    const timer = setInterval(loadDashboardData, 8000);
+    return () => clearInterval(timer);
   }, []);
 
   const loadDashboardData = async () => {
@@ -59,13 +63,15 @@ export default function DashboardPage({ setActiveTab, setComposerInitialData }) 
             <Send className="w-4 h-4" />
             New Email Campaign
           </button>
-          <button
-            onClick={() => setActiveTab('accounts')}
-            className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold rounded-xl flex items-center gap-2 border border-slate-700 transition-all"
-          >
-            <PlusCircle className="w-4 h-4 text-emerald-400" />
-            Add Gmail Account
-          </button>
+          {isMaster && (
+            <button
+              onClick={() => setActiveTab('accounts')}
+              className="px-4 py-2.5 bg-slate-800 hover:bg-slate-700 text-slate-200 text-sm font-semibold rounded-xl flex items-center gap-2 border border-slate-700 transition-all"
+            >
+              <PlusCircle className="w-4 h-4 text-emerald-400" />
+              Add Gmail Account
+            </button>
+          )}
         </div>
       </div>
 
@@ -206,24 +212,28 @@ export default function DashboardPage({ setActiveTab, setComposerInitialData }) 
               <Mail className="w-4 h-4 text-indigo-400" />
               Connected Accounts Status
             </h3>
-            <button
-              onClick={() => setActiveTab('accounts')}
-              className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1"
-            >
-              View All <ArrowUpRight className="w-3.5 h-3.5" />
-            </button>
+            {isMaster && (
+              <button
+                onClick={() => setActiveTab('accounts')}
+                className="text-xs text-indigo-400 hover:text-indigo-300 font-semibold flex items-center gap-1"
+              >
+                View All <ArrowUpRight className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
 
           {accounts.length === 0 ? (
             <div className="text-center py-8 border border-dashed border-slate-800 rounded-xl">
               <Mail className="w-8 h-8 text-slate-600 mx-auto mb-2" />
               <p className="text-sm text-slate-400">No Gmail accounts connected yet.</p>
-              <button
-                onClick={() => setActiveTab('accounts')}
-                className="mt-3 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors"
-              >
-                Connect Your First Gmail Account
-              </button>
+              {isMaster && (
+                <button
+                  onClick={() => setActiveTab('accounts')}
+                  className="mt-3 px-3.5 py-1.5 bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold rounded-lg transition-colors"
+                >
+                  Connect Your First Gmail Account
+                </button>
+              )}
             </div>
           ) : (
             <div className="space-y-3">
