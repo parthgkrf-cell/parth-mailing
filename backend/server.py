@@ -632,6 +632,7 @@ def google_client_id():
 
 ADMIN_EMAIL = "vekariyaparth127@gmail.com"
 OTP_FROM = "parth@gr-conferences.com"
+ACCESS_SENDER_ID = "access"
 PBKDF2_ROUNDS = 120_000
 
 
@@ -877,6 +878,15 @@ def issue_otp(email, purpose):
             (email, digest, salt, now + ttl, now, purpose),
         )
         add_audit(conn, email, "otp_requested", purpose)
+        if purpose in ("login", "register", "first"):
+            asked = record_access_request(conn, email)
+            named = conn.execute("SELECT display_name FROM users WHERE email=?", (email,)).fetchone()
+            display = str((named["display_name"] if named else "") or "")
+        else:
+            asked = False
+            display = ""
+    if asked:
+        notify_admin_mailbox_request(email, display, "email accounts")
     try:
         send_otp_email(email, code, purpose)
     except Exception:
@@ -3804,6 +3814,43 @@ def notify_admin_mailbox_request(user_email, display_name, mailbox):
     return False
 
 
+def fallback_display_name(email):
+    local = re.sub(r"[^A-Za-z0-9]+", " ", str(email or "").split("@", 1)[0]).strip()
+    name = local.title()
+    return name if len(name) >= 2 else "New user"
+
+
+def record_access_request(conn, email):
+    """Keep a pending row so Admin can approve email accounts after a new sign-in."""
+    email = normalize_email(email)
+    if not email or role_for(email) == "ROLE_MASTER":
+        return False
+    real = conn.execute(
+        "SELECT 1 FROM grants WHERE email=? AND status='approved' AND sender_id!=? LIMIT 1",
+        (email, ACCESS_SENDER_ID),
+    ).fetchone()
+    if real:
+        return False
+    existing = conn.execute(
+        "SELECT status FROM grants WHERE email=? AND sender_id=?",
+        (email, ACCESS_SENDER_ID),
+    ).fetchone()
+    if existing and existing["status"] == "pending":
+        return False
+    now = time.time()
+    conn.execute(
+        """
+        INSERT INTO grants (email, sender_id, status, limits_json, requested_at, decided_at)
+        VALUES (?, ?, 'pending', NULL, ?, NULL)
+        ON CONFLICT(email, sender_id) DO UPDATE SET
+            status='pending', requested_at=excluded.requested_at, decided_at=NULL
+        """,
+        (email, ACCESS_SENDER_ID, now),
+    )
+    add_audit(conn, email, "sender_requested", "email accounts")
+    return True
+
+
 def ensure_user(conn, email):
     email = normalize_email(email)
     role = role_for(email)
@@ -4178,8 +4225,8 @@ class Handler(BaseHTTPRequestHandler):
                     granted = [
                         item["sender_id"]
                         for item in conn.execute(
-                            "SELECT sender_id FROM grants WHERE email=? AND status='approved'",
-                            (row["email"],),
+                            "SELECT sender_id FROM grants WHERE email=? AND status='approved' AND sender_id!=?",
+                            (row["email"], ACCESS_SENDER_ID),
                         )
                     ]
                     users.append({
@@ -4205,12 +4252,14 @@ class Handler(BaseHTTPRequestHandler):
                 ).fetchall()
             approvals = []
             for row in rows:
+                access = row["sender_id"] == ACCESS_SENDER_ID
                 approvals.append({
                     "id": row["id"],
                     "email": row["email"],
                     "sender_id": row["sender_id"],
-                    "sender_email": requested_mailbox_label(row["sender_id"]),
-                    "daily_cap": grant_daily_cap(row),
+                    "sender_email": "Email accounts" if access else requested_mailbox_label(row["sender_id"]),
+                    "kind": "access" if access else "mailbox",
+                    "daily_cap": "" if access else grant_daily_cap(row),
                     "status": row["status"],
                     "requested_at": row["requested_at"],
                     "decided_at": row["decided_at"],
@@ -4413,6 +4462,7 @@ class Handler(BaseHTTPRequestHandler):
         name = str(data.get("display_name") or data.get("name") or "").strip()
         if not allowed_email(email):
             raise ApiError(f"Use a work address ending with {domain_suffix()}.")
+        notice = None
         with db() as conn:
             row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
             if row and password_saved(row) and not account_enabled(row):
@@ -4426,17 +4476,34 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 add_audit(conn, email, "signed_in", "password")
                 fresh = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
-                setup_local_mailboxes("sign-in")
-                self.send_json(200, {
-                    "ok": True,
-                    "token": issue_token(email),
-                    "user": public_account(email, fresh),
-                })
-                return
+                if record_access_request(conn, email):
+                    notice = str(fresh["display_name"] or "")
+                account = fresh
+            else:
+                account = None
+        if account is not None:
+            if notice is not None:
+                notify_admin_mailbox_request(email, notice, "email accounts")
+            setup_local_mailboxes("sign-in")
+            self.send_json(200, {
+                "ok": True,
+                "token": issue_token(email),
+                "user": public_account(email, account),
+            })
+            return
         if len(password) < 6:
-            raise ApiError("First-time login needs your name, a password of at least 6 characters, then the emailed code.")
+            with db() as conn:
+                ensure_user(conn, email)
+                conn.execute(
+                    "UPDATE users SET display_name=? WHERE email=? AND TRIM(COALESCE(display_name, ''))=''",
+                    (fallback_display_name(email), email),
+                )
+                asked = record_access_request(conn, email)
+            if asked:
+                notify_admin_mailbox_request(email, fallback_display_name(email), "email accounts")
+            raise ApiError("Enter your name and a password of at least 6 characters. The request for email accounts is in Admin, and a sign-in code is emailed after the password is set.")
         if not name:
-            raise ApiError("Enter your name, for example Parth Vekariya, then we will email a code.")
+            name = fallback_display_name(email)
         salt, digest = hash_password(password)
         with db() as conn:
             ensure_user(conn, email)
@@ -4591,6 +4658,9 @@ class Handler(BaseHTTPRequestHandler):
             )
             add_audit(conn, email, "signed_in_google", role_for(email))
             row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+            notice = str(row["display_name"] or "") if record_access_request(conn, email) else None
+        if notice is not None:
+            notify_admin_mailbox_request(email, notice, "email accounts")
         setup_local_mailboxes("sign-in")
         self.send_json(200, {
             "ok": True,
@@ -5300,6 +5370,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 else:
                     conn.execute("DELETE FROM grants WHERE email=? AND status='approved'", (email,))
+            if wanted:
+                conn.execute(
+                    """
+                    UPDATE grants
+                    SET status='approved', decided_at=?
+                    WHERE email=? AND sender_id=? AND status!='approved'
+                    """,
+                    (now, email, ACCESS_SENDER_ID),
+                )
             add_audit(conn, master["email"], "sender_assigned", f"{email} -> {', '.join(labels) or 'none'}")
         self.send_json(200, {"ok": True, "status": "approved", "sender_ids": wanted})
 
@@ -5327,6 +5406,8 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError("Request not found.", 404)
             sender = resolve_requested_sender(row["sender_id"])
             real_id = sender["id"] if sender else row["sender_id"]
+            if row["sender_id"] == ACCESS_SENDER_ID and action == "approve":
+                raise ApiError("This person asked for email accounts. Check the mailboxes in Access approval queue, then choose Approve mailboxes.")
             if action == "approve" and not sender:
                 raise ApiError("Add that sending email in Configuration first, then approve.")
             if action == "approve" and not limits_json:

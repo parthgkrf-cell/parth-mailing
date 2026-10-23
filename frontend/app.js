@@ -21,6 +21,7 @@ const state = {
   campSig: "",
   users: [],
   approvals: [],
+  approvalError: "",
   audit: [],
   monitor: null,
   recipients: [],
@@ -676,7 +677,7 @@ function assignedLabels(user) {
   return senderCatalog().filter((sender) => owned.has(sender.id)).map((sender) => sender.display_name || sender.email);
 }
 
-function htmlMailboxAssign(user) {
+function htmlMailboxAssign(user, buttonLabel) {
   const senders = senderCatalog();
   const owned = new Set(user.sender_ids || []);
   if (!senders.length) return `<p class="hint">Add mailing accounts above, then assign them here.</p>`;
@@ -687,7 +688,24 @@ function htmlMailboxAssign(user) {
     </label>`).join("");
   return `
     <div class="assign-grid">${boxes}</div>
-    <div class="row"><button class="btn btn-primary" type="button" data-action="assign-sender" data-email="${esc(user.email)}">Save mailboxes</button></div>`;
+    <div class="row"><button class="btn btn-primary" type="button" data-action="assign-sender" data-email="${esc(user.email)}">${esc(buttonLabel || "Save mailboxes")}</button></div>`;
+}
+
+function isAccessRequest(item) {
+  return item.sender_id === "access" || item.kind === "access";
+}
+
+function htmlAccessRequest(item) {
+  const user = (state.users || []).find((row) => normalizeEmail(row.email) === normalizeEmail(item.email))
+    || { email: item.email, sender_ids: [] };
+  return `
+    <article class="stack assign-card">
+      <div>
+        <strong>${esc(accountLabel(item.email))}</strong>
+        <div class="hint">${item.status === "denied" ? "Denied earlier." : "Signed in and asked for email accounts."} ${esc(stamp(item.requested_at))}. Check the mailboxes, then approve.</div>
+      </div>
+      ${htmlMailboxAssign(user, "Approve mailboxes")}
+    </article>`;
 }
 
 function htmlMaster() {
@@ -714,7 +732,10 @@ function htmlMaster() {
     </article>`;
   }).join("") || `<p>No accounts yet.</p>`;
   const queueItems = state.approvals.filter((item) => item.status === "pending" || item.status === "denied");
-  const requestRows = queueItems.map((item) => `
+  const accessEmails = new Set(queueItems.filter(isAccessRequest).map((item) => normalizeEmail(item.email)));
+  const requestRows = queueItems.map((item) => {
+    if (isAccessRequest(item)) return htmlAccessRequest(item);
+    return `
     <div class="spread">
       <div>
         <strong>${esc(accountLabel(item.email))}</strong>
@@ -726,14 +747,17 @@ function htmlMaster() {
         <button class="btn btn-primary" type="button" data-action="decide" data-op="approve" data-id="${item.id}">Approve</button>
         ${item.status === "pending" ? `<button class="btn btn-danger" type="button" data-action="decide" data-op="deny" data-id="${item.id}">Deny</button>` : ""}
       </div>
-    </div>`).join("");
-  const waitingUsers = state.users.filter((user) => normalizeEmail(user.email) !== adminEmail() && user.role !== "ROLE_MASTER" && !(user.sender_ids || []).length);
+    </div>`;
+  }).join("");
+  const waitingUsers = state.users.filter((user) => normalizeEmail(user.email) !== adminEmail() && user.role !== "ROLE_MASTER" && !(user.sender_ids || []).length && !accessEmails.has(normalizeEmail(user.email)));
   const waitingRows = waitingUsers.map((user) => `
     <article class="stack assign-card">
-      <div><strong>${esc(accountLabel(user.email))}</strong><div class="hint">Signed up and has no sending mailbox yet. Check every account this user may send from.</div></div>
-      ${htmlMailboxAssign(user)}
+      <div><strong>${esc(accountLabel(user.email))}</strong><div class="hint">Signed in and asked for email accounts. Check every mailbox this person may send from.</div></div>
+      ${htmlMailboxAssign(user, "Approve mailboxes")}
     </article>`).join("");
-  const approvals = (requestRows + waitingRows) || `<p>The approval queue is clear.</p>`;
+  const waitingCount = queueItems.length + waitingUsers.length;
+  const failure = state.approvalError ? `<p class="note">${esc(state.approvalError)}</p>` : "";
+  const approvals = `${failure}${requestRows}${waitingRows}` || `<p>The approval queue is clear.</p>`;
   const live = ((state.monitor && state.monitor.campaigns) || []).map(campaignCard).join("") || `<p>No live queues.</p>`;
   const boxes = ((state.monitor && state.monitor.mailboxes) || []).map((box) => `
     <article class="card glass stat"><span class="hint">Internal mailbox</span><strong>${box.remaining}</strong><span class="hint">${box.used_24h} of ${box.cap_24h} in 24h · ${box.live ? "live" : "simulated"}</span></article>`).join("");
@@ -741,7 +765,7 @@ function htmlMaster() {
     <div class="hint">${esc(stamp(item.created_at))} · ${esc(maskAddress(item.actor))} · ${esc(item.action)} · ${esc(maskAddress(item.detail || ""))}</div>`).join("") || `<p>No audit events yet.</p>`;
   const drive = (state.health && state.health.drive) || {};
   return `
-    <section class="card glass stack" id="approval-queue"><h3>Access approval queue</h3>${approvals}</section>
+    <section class="card glass stack" id="approval-queue"><h3>Access approval queue${waitingCount ? ` · ${waitingCount} to approve` : ""}</h3>${approvals}</section>
     ${htmlMailboxSetup()}
     <section class="card glass stack" id="admin-setup">
       <h3>Work setup</h3>
@@ -1956,7 +1980,7 @@ async function refreshMaster() {
       return await api(path);
     } catch (error) {
       console.warn(path, error);
-      return fallback;
+      return Object.assign({}, fallback, { error: error.message || "Could not load this list." });
     }
   };
   const [users, approvals, audit, monitor, senders] = await Promise.all([
@@ -1968,10 +1992,17 @@ async function refreshMaster() {
   ]);
   state.users = users.users || [];
   state.approvals = approvals.approvals || [];
+  state.approvalError = approvals.error || users.error || "";
   state.audit = audit.audit || [];
   state.monitor = monitor;
   state.masterSenders = senders.senders || [];
   state.mailboxSheetUrl = senders.sheet_url || state.mailboxSheetUrl || "";
+}
+
+function approvalSignature() {
+  const items = (state.approvals || []).map((item) => [item.id, item.status, item.email, item.sender_id].join("~")).join("|");
+  const people = (state.users || []).map((user) => [user.email, user.enabled, (user.sender_ids || []).join(",")].join("~")).join("|");
+  return items + "#" + people + "#" + (state.approvalError || "");
 }
 
 function campaignSignature() {
@@ -2008,7 +2039,7 @@ async function tick() {
     paintScheduleButton();
     await refreshCatalog();
     if (state.view === "master") await refreshMaster();
-    const signature = campaignSignature() + (state.monitor ? state.monitor.campaigns.length : "");
+    const signature = campaignSignature() + (state.view === "master" ? approvalSignature() : "") + (state.monitor ? state.monitor.campaigns.length : "");
     const idle = Date.now() - state.lastInteract > 2500;
     const typing = document.activeElement && document.activeElement.closest("input, textarea, select");
     if ((signature !== before || moved) && idle && !typing && !deskDirty() && !assignDirty() && ["home", "campaigns", "history", "master"].includes(state.view)) {
@@ -2297,7 +2328,7 @@ function setAuthMode(mode) {
       ? "Enter your name, email, and password. Paste the 6-digit code emailed from parth@gr-conferences.com."
       : state.authMode === "forgot"
         ? "Paste the 6-digit code from parth@gr-conferences.com, then choose a new password."
-        : "Sign in with email and password. If an admin removed the account, choose Email me a code. The code comes from parth@gr-conferences.com.";
+        : "Sign in with email and password. A new device, or an account the admin removed, asks for a code from parth@gr-conferences.com. The admin approves email accounts from Admin.";
   }
   paintLoginButton();
 }
@@ -2662,6 +2693,8 @@ const actions = {
     const root = el.closest(".assign-card") || document;
     const boxes = [...root.querySelectorAll(`[data-assign-box="${CSS.escape(email)}"]`)];
     const senderIds = boxes.filter((box) => box.checked).map((box) => box.value);
+    const approving = /approve/i.test(el.textContent || "");
+    if (approving && !senderIds.length) throw new Error("Check at least one mailing account to approve.");
     await api("/api/master/senders/assign", {
       method: "POST",
       body: JSON.stringify({ email, sender_ids: senderIds, replace: true }),
@@ -2669,7 +2702,9 @@ const actions = {
     await refreshMaster();
     await refreshCatalog();
     renderView();
-    toast(senderIds.length ? `${senderIds.length} mailbox${senderIds.length === 1 ? "" : "es"} saved` : "Mailboxes removed");
+    toast(senderIds.length
+      ? (approving ? "Email accounts approved" : `${senderIds.length} mailbox${senderIds.length === 1 ? "" : "es"} saved`)
+      : "Mailboxes removed");
   },
   "toggle-theme"() {
     applyTheme(document.documentElement.dataset.theme === "light" ? "dark" : "light");
