@@ -1844,15 +1844,20 @@ def classify_smtp_error(exc):
 
 
 def account_error_is_fatal(message):
-    lowered = message.lower()
+    """True when this mailbox cannot keep sending. One bad recipient is not fatal."""
+    lowered = str(message or "").lower()
     needles = (
         "authentication",
         "app password",
-        "closed the connection",
-        "unexpectedly closed",
-        "timed out",
-        "connection refused",
+        "invalid credentials",
+        "username and password not accepted",
         "password missing",
+        "smtp host is missing",
+        "535",
+        "534",
+        "closed the connection",
+        "blocking smtp",
+        "connection refused",
     )
     return any(needle in lowered for needle in needles)
 
@@ -3229,6 +3234,79 @@ def next_ready_at(campaign_id, sender_id=None):
 
 
 DNS_RETRY = {}
+RETIRED_MAILBOXES = set()
+
+
+def retire_key(campaign_id, sender_id):
+    return f"{campaign_id}:{sender_id or ''}"
+
+
+def campaign_sender_ids(campaign):
+    try:
+        pool_ids = json.loads((campaign or {}).get("sender_ids_json") or "[]")
+    except (TypeError, json.JSONDecodeError):
+        pool_ids = []
+    if not isinstance(pool_ids, list):
+        pool_ids = []
+    pool_ids = [str(item) for item in pool_ids if item]
+    if not pool_ids and (campaign or {}).get("sender_id"):
+        pool_ids = [str(campaign["sender_id"])]
+    return pool_ids
+
+
+def mailbox_has_room(sender):
+    if not sender or not sender.get("user"):
+        return False
+    try:
+        cap = mailbox_daily_cap(sender)
+    except Exception:
+        return False
+    return pace_used(sender["user"]) < cap
+
+
+def pass_failed_mailbox(campaign, sender_id, reason):
+    """Leave a failed mailbox and give its remaining rows to the next one."""
+    if not campaign or not campaign.get("id"):
+        return 0
+    RETIRED_MAILBOXES.add(retire_key(campaign["id"], sender_id))
+    others = []
+    for item_id in campaign_sender_ids(campaign):
+        if item_id == sender_id or retire_key(campaign["id"], item_id) in RETIRED_MAILBOXES:
+            continue
+        sender = sender_by_id(item_id)
+        if sender and mailbox_has_room(sender):
+            others.append(sender)
+    reason = str(reason or "This mailbox could not send.")[:500]
+    with db() as conn:
+        rows = list(conn.execute(
+            """
+            SELECT id FROM recipients
+            WHERE campaign_id=? AND status='QUEUED' AND IFNULL(sender_id,'')=?
+            ORDER BY id
+            """,
+            (campaign["id"], sender_id or ""),
+        ))
+        if not rows:
+            return 0
+        if not others:
+            conn.execute(
+                """
+                UPDATE recipients
+                SET status='FAILED', error=?, smtp_code='ACCOUNT'
+                WHERE campaign_id=? AND status='QUEUED' AND IFNULL(sender_id,'')=?
+                """,
+                (reason, campaign["id"], sender_id or ""),
+            )
+            recompute_counts(conn, campaign["id"])
+            add_audit(conn, "relay", "mailbox_skipped", f"{campaign['id']} {sender_id} {len(rows)} not delivered")
+            log(f"Mailbox stopped. {len(rows)} left on that account were marked not delivered so the list can finish.")
+            return len(rows)
+        for index, row in enumerate(rows):
+            nxt = others[index % len(others)]
+            conn.execute("UPDATE recipients SET sender_id=? WHERE id=?", (nxt["id"], row["id"]))
+        add_audit(conn, "relay", "mailbox_skipped", f"{campaign['id']} {sender_id} {len(rows)} moved")
+    log(f"Mailbox stopped. {len(rows)} left moved to the next mailbox.")
+    return len(rows)
 
 
 def network_lookup_failed(text):
@@ -3265,12 +3343,12 @@ def save_outcome(campaign, recipient, outcome, sender):
                 (normalize_email(sender["user"]), now),
             )
             remember_shared_send(sender["user"], now)
-        if outcome["status"] != "SENT" and account_error_is_fatal(outcome.get("error") or ""):
-            conn.execute(
-                "UPDATE campaigns SET status='paused', hold_reason=? WHERE id=? AND status='running'",
-                (outcome.get("error") or "Sending paused", campaign["id"]),
-            )
-            add_audit(conn, "relay", "campaign_paused", f"{campaign['id']} {outcome.get('error') or ''}")
+    if outcome["status"] not in ("SENT", "DRAFTED", "QUEUED") and account_error_is_fatal(outcome.get("error") or ""):
+        pass_failed_mailbox(
+            campaign,
+            (sender or {}).get("id") or recipient.get("sender_id") or "",
+            outcome.get("error") or "This mailbox could not send.",
+        )
     if outcome["status"] == "SENT" and not outcome.get("simulated"):
         with db() as conn:
             conn.execute("DELETE FROM pace WHERE sent_at < ?", (time.time() - 86400 * 2,))
@@ -3483,8 +3561,11 @@ def process_account_send(campaign_id, sender_id):
         return
     sender = sender_by_id(sender_id) or sender_by_id(camp.get("sender_id"))
     key = sleep_key(campaign_id, sender_id)
+    if retire_key(campaign_id, sender_id) in RETIRED_MAILBOXES:
+        return
     if not sender:
-        SLEEP_UNTIL[key] = time.time() + 30
+        pass_failed_mailbox(camp, sender_id, "This mailbox is no longer on the desk.")
+        finish_if_drained(camp["id"])
         return
     with db() as conn:
         user_row = conn.execute("SELECT * FROM users WHERE email=?", (camp["owner"],)).fetchone()
@@ -3518,8 +3599,9 @@ def process_account_send(campaign_id, sender_id):
         used = pace_used(sender["user"])
         cap = min(mailbox_daily_cap(sender), int(limits.get("per_day") or mailbox_daily_cap(sender)))
         if used >= cap:
-            SLEEP_UNTIL[key] = time.time() + 120
             log(f"{sender['user']} reached the 24-hour mailbox cap of {cap}")
+            pass_failed_mailbox(camp, sender["id"], f"{sender['user']} reached the 24-hour mailbox cap of {cap}.")
+            finish_if_drained(camp["id"])
             return
     clear_hold(camp["id"])
     recipient = claim_recipient(camp["id"], sender["id"])
@@ -3545,7 +3627,8 @@ def process_account_send(campaign_id, sender_id):
             outcome["status"] = "FAILED"
             outcome["error"] = "The computer could not find the mail server. Check the internet connection, then start sending again."
     save_outcome(camp, recipient, outcome, sender)
-    after_send_delay(camp, sender)
+    if retire_key(camp["id"], sender.get("id")) not in RETIRED_MAILBOXES:
+        after_send_delay(camp, sender)
     label = "SIMULATED" if outcome.get("simulated") else outcome["status"]
     verb = "draft" if campaign_action(camp) == "draft" else "send"
     log(f"{label} [{verb}] {sender['user']} -> {recipient['email']} {outcome.get('code') or ''} {(outcome.get('error') or '')[:160]}")
@@ -3588,7 +3671,13 @@ def engine_dispatch():
         if not sender_ids:
             finish_if_drained(camp["id"])
             continue
-        for sender_id in sender_ids:
+        active_ids = [item for item in sender_ids if retire_key(camp["id"], item) not in RETIRED_MAILBOXES]
+        if not active_ids:
+            for sender_id in sender_ids:
+                pass_failed_mailbox(camp, sender_id, "This mailbox stopped, so the rest of its list was not sent.")
+            finish_if_drained(camp["id"])
+            continue
+        for sender_id in active_ids:
             key = sleep_key(camp["id"], sender_id)
             if SLEEP_UNTIL.get(key, 0) > now:
                 continue
