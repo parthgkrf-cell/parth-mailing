@@ -351,12 +351,12 @@ function htmlHome() {
       <article class="card glass stat">
         <span class="hint">Total sent email</span>
         <strong>${Number(ledger.total_sent || 0).toLocaleString()}</strong>
-        <span class="hint">Sent in the last 24 hours</span>
+        <span class="hint">Sent in the last 24 hours. To, Cc, and Bcc each count as one.</span>
       </article>
       <article class="card glass stat">
         <span class="hint">Total left email</span>
         <strong>${Number(ledger.total_left || 0).toLocaleString()}</strong>
-        <span class="hint">Still available on assigned accounts</span>
+        <span class="hint">Cap minus sent, across the assigned accounts</span>
       </article>
     </div>`;
   return `

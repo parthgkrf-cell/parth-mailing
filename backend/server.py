@@ -498,7 +498,9 @@ def mailbox_quota(conn, user):
     """Daily room across the mailboxes this login can send from.
 
     Gmail is 200 and Google Workspace is 800 unless a lower cap is saved
-    on that mailbox. Sent and left use the last 24 hours for each mailbox.
+    on that mailbox. Each To, Cc, and Bcc address counts as one. Sent and
+    left use the last 24 hours for each mailbox. Left is the cap minus sent,
+    and never goes below zero. The totals add those mailboxes.
     """
     cutoff = time.time() - 86400
     used_by_email = {}
@@ -2020,6 +2022,20 @@ def split_address_list(raw):
     return good, bad
 
 
+def message_address_count(campaign, recipient):
+    """To, Cc, and Bcc each take one from the mailbox limit."""
+    fields = parsed_fields(recipient)
+    cc_raw = row_copy(fields, CC_FIELD_KEYS, (campaign or {}).get("cc") or "")
+    bcc_raw = row_copy(fields, BCC_FIELD_KEYS, (campaign or {}).get("bcc") or "")
+    cc_list, _cc_bad = split_address_list(cc_raw)
+    bcc_list, _bcc_bad = split_address_list(bcc_raw)
+    to_addr = normalize_email((recipient or {}).get("email"))
+    count = len(cc_list) + len(bcc_list)
+    if EMAIL_RE.match(to_addr):
+        count += 1
+    return max(1, count)
+
+
 def build_message(sender, recipient_email, subject, html_body, cc_list, attachments):
     html_body, images = extract_inline_images(html_body)
     plain = html_to_text(html_body) or " "
@@ -2121,7 +2137,7 @@ def deliver(campaign, recipient, sender, limits_ignored=False):
             copy_to_sent(sender, message)
         except Exception as exc:
             log(f"Sent folder copy failed for {sender.get('user') or ''}: {str(exc)[:180]}")
-        return {"status": "SENT", "code": code, "error": "", "simulated": False}
+        return {"status": "SENT", "code": code, "error": "", "simulated": False, "copies": message_address_count(campaign, recipient)}
     except Exception as exc:
         status, code, detail = classify_smtp_error(exc)
         return {"status": status, "code": code, "error": detail, "simulated": False}
@@ -3016,13 +3032,17 @@ def local_send_log_path():
     return os.path.join(DATA_DIR, send_log_name())
 
 
-def remember_shared_send(sender_email, stamp):
+def remember_shared_send(sender_email, stamp, copies=1):
     """Keep one line per send so every computer can count the same 24 hours."""
     global _SEND_LOG_DIRTY
     email = normalize_email(sender_email)
     if not email:
         return
-    line = json.dumps({"email": email, "at": round(float(stamp), 3)}, separators=(",", ":"))
+    try:
+        count = max(1, min(int(copies or 1), 500))
+    except (TypeError, ValueError):
+        count = 1
+    line = json.dumps({"email": email, "at": round(float(stamp), 3), "n": count}, separators=(",", ":"))
     os.makedirs(DATA_DIR, exist_ok=True)
     with _SEND_LOG_GUARD:
         with open(local_send_log_path(), "a", encoding="utf-8") as handle:
@@ -3063,7 +3083,7 @@ def publish_send_log():
 
 def merge_shared_sends(lines):
     cutoff = time.time() - 86400
-    rows = []
+    wanted = {}
     for line in lines:
         try:
             item = json.loads(line)
@@ -3074,23 +3094,30 @@ def merge_shared_sends(lines):
             stamp = float(item.get("at") or 0)
         except (TypeError, ValueError):
             continue
+        try:
+            copies = max(1, min(int(item.get("n") or 1), 500))
+        except (TypeError, ValueError):
+            copies = 1
         if email and stamp >= cutoff:
-            rows.append((email, stamp))
-    if not rows:
+            key = (email, round(stamp, 3))
+            wanted[key] = max(wanted.get(key, 0), copies)
+    if not wanted:
         return 0
     added = 0
     with db() as conn:
-        for email, stamp in rows:
-            cur = conn.execute(
-                """
-                INSERT INTO pace (sender_email, sent_at)
-                SELECT ?, ? WHERE NOT EXISTS (
-                    SELECT 1 FROM pace WHERE sender_email=? AND ABS(sent_at - ?) < 1
-                )
-                """,
-                (email, stamp, email, stamp),
+        for (email, stamp), copies in wanted.items():
+            existing = conn.execute(
+                "SELECT COUNT(*) AS n FROM pace WHERE sender_email=? AND ABS(sent_at - ?) < 1",
+                (email, stamp),
+            ).fetchone()["n"]
+            missing = copies - int(existing or 0)
+            if missing <= 0:
+                continue
+            conn.executemany(
+                "INSERT INTO pace (sender_email, sent_at) VALUES (?, ?)",
+                [(email, stamp) for _ in range(missing)],
             )
-            added += cur.rowcount
+            added += missing
     return added
 
 
@@ -3291,11 +3318,16 @@ def save_outcome(campaign, recipient, outcome, sender):
         if outcome["status"] == "SENT" and not outcome.get("already_recorded"):
             remember_sent(conn, recipient["email"], campaign["owner"], campaign["id"])
         if outcome["status"] == "SENT" and not outcome.get("simulated"):
-            conn.execute(
+            try:
+                copies = max(1, min(int(outcome.get("copies") or 1), 500))
+            except (TypeError, ValueError):
+                copies = 1
+            sender_email = normalize_email(sender["user"])
+            conn.executemany(
                 "INSERT INTO pace (sender_email, sent_at) VALUES (?, ?)",
-                (normalize_email(sender["user"]), now),
+                [(sender_email, now) for _ in range(copies)],
             )
-            remember_shared_send(sender["user"], now)
+            remember_shared_send(sender_email, now, copies)
     if outcome["status"] in ("FAILED", "BOUNCED"):
         write_report(campaign["id"], upload=False)
     if outcome["status"] == "SENT" and not outcome.get("simulated"):
@@ -3541,10 +3573,6 @@ def process_account_send(campaign_id, sender_id):
             SLEEP_UNTIL[key] = time.time() + 30
             set_hold(camp["id"], f"Company daily limit of {company_cap} has been reached.", 30)
             return
-    wait = rate_wait_seconds(sender["user"], limits)
-    if wait > 0:
-        SLEEP_UNTIL[key] = time.time() + min(wait, 30)
-        return
     if live_delivery(sender) and campaign_action(camp) != "draft":
         sync_shared_send_log()
         used = pace_used(sender["user"])
@@ -3554,6 +3582,13 @@ def process_account_send(campaign_id, sender_id):
             note_mailbox_rows(camp, sender["id"], f"{sender['user']} reached the 24-hour mailbox cap of {cap}.")
             finish_if_drained(camp["id"])
             return
+    else:
+        used = 0
+        cap = 0
+    wait = rate_wait_seconds(sender["user"], limits)
+    if wait > 0:
+        SLEEP_UNTIL[key] = time.time() + min(wait, 30)
+        return
     clear_hold(camp["id"])
     recipient = claim_recipient(camp["id"], sender["id"])
     if recipient is None:
@@ -3563,6 +3598,18 @@ def process_account_send(campaign_id, sender_id):
             return
         finish_if_drained(camp["id"])
         return
+    if cap and live_delivery(sender) and campaign_action(camp) != "draft":
+        copies = message_address_count(camp, recipient)
+        room = cap - pace_used(sender["user"])
+        if copies > room:
+            save_outcome(camp, recipient, {
+                "status": "FAILED",
+                "code": "LIMIT",
+                "error": f"This message has {copies} addresses in To, Cc, and Bcc, and this mailbox has {max(0, room)} left today.",
+                "simulated": False,
+            }, sender)
+            finish_if_drained(camp["id"])
+            return
     try:
         outcome = deliver(camp, recipient, sender)
     except Exception as exc:
