@@ -1755,9 +1755,8 @@ def friendly_imap_error(exc):
     return text[:400]
 
 
-def connect_smtp(sender):
+def connect_smtp(sender, timeout=30):
     context = ssl.create_default_context()
-    timeout = 30
     last = None
     for mode, host, port in smtp_attempts(sender):
         smtp = None
@@ -2962,7 +2961,15 @@ def apply_mailbox_sheet(url, only_email=""):
     }
 
 
-def provider_cap(sender=None, email=""):
+def clamp_daily_cap(value, default):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        number = int(default)
+    return max(1, min(number, 10000))
+
+
+def mailbox_kind(sender=None, email=""):
     if isinstance(sender, str):
         email = sender
         sender = None
@@ -2971,13 +2978,30 @@ def provider_cap(sender=None, email=""):
     domain = email.split("@", 1)[1] if "@" in email else ""
     host = str(sender.get("host") or "").lower()
     if domain in ("gmail.com", "googlemail.com"):
-        return GMAIL_DAILY_CAP
+        return "gmail"
     if domain or "gmail" in host or "google" in host or "googlemail" in host:
-        return WORKSPACE_DAILY_CAP
+        return "workspace"
+    return "other"
+
+
+def gmail_daily_cap():
+    return clamp_daily_cap(load_config().get("gmail_daily_cap"), GMAIL_DAILY_CAP)
+
+
+def workspace_daily_cap():
+    return clamp_daily_cap(load_config().get("workspace_daily_cap"), WORKSPACE_DAILY_CAP)
+
+
+def provider_cap(sender=None, email=""):
+    kind = mailbox_kind(sender, email)
+    if kind == "gmail":
+        return gmail_daily_cap()
+    if kind == "workspace":
+        return workspace_daily_cap()
     try:
-        return int(load_config().get("other_daily_cap") or WORKSPACE_DAILY_CAP)
+        return clamp_daily_cap(load_config().get("other_daily_cap"), WORKSPACE_DAILY_CAP)
     except (TypeError, ValueError):
-        return WORKSPACE_DAILY_CAP
+        return workspace_daily_cap()
 
 
 def mailbox_daily_cap(sender=None, email=""):
@@ -3738,9 +3762,11 @@ def test_sender_connection(sender):
     if not sender["host"] or not sender["user"] or not sender["password"]:
         return False, "Host, username, and password are required."
     smtp_message = ""
+    smtp_ok = False
     try:
         smtp = connect_smtp(sender)
         safe_quit(smtp)
+        smtp_ok = True
         smtp_message = f"SMTP authentication succeeded for {sender['user']}."
     except Exception as exc:
         smtp_message = friendly_smtp_error(exc)
@@ -3757,9 +3783,14 @@ def test_sender_connection(sender):
         imap_message = f"Gmail Drafts is ready in {folder}."
     except Exception as exc:
         imap_message = friendly_imap_error(exc)
-    ok = bool(smtp_message.startswith("SMTP authentication succeeded")) and imap_ok
-    message = imap_message if not imap_ok else f"{smtp_message} {imap_message}"
-    if not ok and not imap_ok:
+    ok = smtp_ok and imap_ok
+    if smtp_ok and imap_ok:
+        message = f"{smtp_message} {imap_message}"
+    elif not smtp_ok and not imap_ok:
+        message = f"{smtp_message} {imap_message}".strip()
+    elif not smtp_ok:
+        message = smtp_message
+    else:
         message = imap_message
     if normalize_email(sender.get("user")) == ADMIN_EMAIL:
         write_mailbox_status(ok, message)
@@ -4174,8 +4205,8 @@ class Handler(BaseHTTPRequestHandler):
                 "admin_email": ADMIN_EMAIL,
                 "google_client_id": google_client_id(),
                 "drive": drive_status(),
-                "gmail_daily_cap": GMAIL_DAILY_CAP,
-                "workspace_daily_cap": WORKSPACE_DAILY_CAP,
+                "gmail_daily_cap": gmail_daily_cap(),
+                "workspace_daily_cap": workspace_daily_cap(),
                 "gmail_gap_seconds": int(GMAIL_CONSUMER_GAP),
                 "workspace_gap_seconds": 4,
                 "active_campaigns": active,
@@ -4456,6 +4487,12 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/master/senders/test":
             self.test_sender(self.require_master(), data)
+            return
+        if path == "/api/master/senders/test-all":
+            self.test_all_senders(self.require_master())
+            return
+        if path == "/api/master/account-limits":
+            self.save_account_limits(self.require_master(), data)
             return
         if path == "/api/master/drive/test":
             self.test_drive(self.require_master())
@@ -5314,6 +5351,49 @@ class Handler(BaseHTTPRequestHandler):
             add_audit(conn, master["email"], "limits_updated", email)
         self.send_json(200, {"ok": True, "limits": limits})
 
+    def save_account_limits(self, master, data):
+        def required_cap(value, label):
+            text = str(value if value is not None else "").strip()
+            if not text.isdigit():
+                raise ApiError(f"Enter a whole number for the {label} daily limit.")
+            number = int(text)
+            if number < 1 or number > 10000:
+                raise ApiError(f"The {label} daily limit must be between 1 and 10000.")
+            return number
+
+        gmail = required_cap(data.get("gmail_daily_cap"), "Gmail")
+        workspace = required_cap(data.get("workspace_daily_cap"), "Workspace")
+        config = load_config()
+        config["gmail_daily_cap"] = gmail
+        config["workspace_daily_cap"] = workspace
+        gmail_count = 0
+        workspace_count = 0
+        senders = []
+        for raw in config.get("senders") or []:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            kind = mailbox_kind(item)
+            if kind == "gmail":
+                item["daily_cap"] = gmail
+                gmail_count += 1
+            elif kind == "workspace":
+                item["daily_cap"] = workspace
+                workspace_count += 1
+            senders.append(item)
+        config["senders"] = senders
+        write_config(config)
+        with db() as conn:
+            add_audit(conn, master["email"], "account_limits_updated", f"gmail {gmail} ({gmail_count}), workspace {workspace} ({workspace_count})")
+        self.send_json(200, {
+            "ok": True,
+            "gmail_daily_cap": gmail,
+            "workspace_daily_cap": workspace,
+            "gmail_count": gmail_count,
+            "workspace_count": workspace_count,
+            "senders": [master_sender_view(prepare_sender(item)) for item in senders],
+        })
+
     def save_senders(self, master, data):
         incoming = data.get("senders")
         if not isinstance(incoming, list):
@@ -5554,6 +5634,47 @@ class Handler(BaseHTTPRequestHandler):
             except ApiError as exc:
                 message = f"{message} {exc.message}"
         self.send_json(200, {"ok": ok, "message": message, "refreshed": refreshed})
+
+    def test_all_senders(self, _master):
+        results = []
+        for sender in configured_senders():
+            email = sender.get("email") or sender.get("user") or ""
+            name = sender.get("display_name") or email
+            if not sender.get("password"):
+                results.append({
+                    "id": sender["id"],
+                    "email": email,
+                    "display_name": name,
+                    "working": False,
+                    "reason": "No app password is saved for this mailbox.",
+                })
+                continue
+            try:
+                smtp = connect_smtp(sender, timeout=12)
+                safe_quit(smtp)
+                results.append({
+                    "id": sender["id"],
+                    "email": email,
+                    "display_name": name,
+                    "working": True,
+                    "reason": "SMTP sign-in succeeded. No message was sent.",
+                })
+            except Exception as exc:
+                results.append({
+                    "id": sender["id"],
+                    "email": email,
+                    "display_name": name,
+                    "working": False,
+                    "reason": friendly_smtp_error(exc),
+                })
+        working = sum(1 for row in results if row["working"])
+        self.send_json(200, {
+            "ok": True,
+            "tested": len(results),
+            "working_count": working,
+            "failing_count": len(results) - working,
+            "results": results,
+        })
 
     def save_desk(self, master, data):
         with db() as conn:

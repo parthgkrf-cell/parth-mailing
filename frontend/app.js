@@ -8,7 +8,7 @@ const TITLES = {
   campaigns: ["Campaigns", "Pace, pauses, and delivery counts"],
   history: ["History", "Reports and Drive links for finished campaigns"],
   config: ["Configuration", "Admin only. Add sending mailboxes, then assign them to users."],
-  master: ["Admin", "Add mailing accounts with 16-digit app passwords, then approve users."],
+  master: ["Master panel", "Approve users, manage mailing accounts, and test every mailbox."],
 };
 
 const state = {
@@ -44,6 +44,9 @@ const state = {
   tracking: { enabled: false, source: "parth-mailing", medium: "email", campaign: "", term: "", content: "" },
   masterSenders: [],
   mailboxSheetUrl: "",
+  mailboxTests: [],
+  testingMailboxes: false,
+  focus: "",
   previewIndex: 0,
   templates: [],
   activeTemplateId: "",
@@ -189,8 +192,8 @@ function stamp(unix) {
 }
 
 function statusBadge(status) {
-  const kind = status === "complete" || status === "SENT" || status === "approved" ? "ok"
-    : status === "failed" || status === "FAILED" || status === "killed" || status === "denied" || status === "not delivered" ? "danger"
+  const kind = status === "complete" || status === "SENT" || status === "approved" || status === "working" ? "ok"
+    : status === "failed" || status === "FAILED" || status === "killed" || status === "denied" || status === "not delivered" || status === "not working" ? "danger"
       : "warn";
   return `<span class="badge ${kind}">${esc(status)}</span>`;
 }
@@ -229,14 +232,14 @@ function paintChrome() {
   document.querySelectorAll(".nav-btn").forEach((button) => {
     button.classList.toggle("active", button.dataset.view === state.view);
     const span = button.querySelector("span");
-    if (button.dataset.view === "master") span.textContent = "Admin";
+    if (button.dataset.view === "master" && !button.dataset.focus) span.textContent = "Master panel";
     else if (span && labels[button.dataset.view]) span.textContent = labels[button.dataset.view];
   });
   const composeLabel = document.querySelector("#compose-button span");
   if (composeLabel && labels.compose) composeLabel.textContent = labels.compose;
   hideAdminNavForUsers();
   const who = document.getElementById("whoami");
-  if (who && state.user) who.textContent = state.user.display_name || (isMasterUser() ? "Admin" : "User");
+  if (who && state.user) who.textContent = state.user.display_name || (isMasterUser() ? "Master" : "User");
   const pill = document.getElementById("relay-pill");
   if (pill && state.health) {
     pill.textContent = state.health.otp_delivery === "email" ? "Live SMTP" : "Simulation";
@@ -265,6 +268,11 @@ function renderView() {
   root.innerHTML = (views[state.view] || htmlHome)();
   paintChrome();
   icons();
+  if (state.focus) {
+    const node = document.getElementById(state.focus);
+    if (node) node.scrollIntoView({ block: "start" });
+    state.focus = "";
+  }
   if (state.view === "recipients") mountRecipients();
   if (state.view === "compose") setComposerMode("dock");
   if (state.view === "preview") paintFullPreview();
@@ -359,7 +367,17 @@ function htmlHome() {
         <span class="hint">Cap minus sent, across the assigned accounts</span>
       </article>
     </div>`;
+  const masterTools = isMasterUser() ? `
+    <section class="card glass stack">
+      <h3>Master panel</h3>
+      <p class="hint">Approve people and mailing accounts here. Test mailboxes checks every saved account and shows the reason when one cannot sign in. No message is sent.</p>
+      <div class="row">
+        <button class="btn btn-primary" type="button" data-action="nav" data-view="master">Open Master panel</button>
+        <button class="btn btn-ghost" type="button" data-action="nav" data-view="master" data-focus="test-mailboxes">Test mailboxes</button>
+      </div>
+    </section>` : "";
   return `
+    ${masterTools}
     ${banner}
     ${quotaCards}
     ${mailboxCard}
@@ -548,7 +566,7 @@ function htmlSenderCard(sender, index, open) {
       <div class="config-grid">
         <label>From name<input class="input" data-sender-name value="${esc(item.display_name || "")}" placeholder="Parth Mailing"></label>
         <label>Mailing email<input class="input" data-sender-email value="${esc(item.email || "")}" placeholder="send@gr-conferences.com"></label>
-        <label>Daily limit<input class="input" data-sender-cap type="number" min="1" max="800" value="${esc(item.daily_cap || item.provider_cap || "")}" placeholder="200 Gmail / 800 Workspace"></label>
+        <label>Daily limit<input class="input" data-sender-cap type="number" min="1" max="10000" value="${esc(item.daily_cap || item.provider_cap || "")}" placeholder="Gmail or Workspace limit"></label>
       </div>
       <label>16-digit Google app password<input class="input" data-sender-password type="text" autocomplete="off" spellcheck="false" maxlength="19" placeholder="${item.has_password ? "Saved on this computer. Paste a new 16-digit code only to replace it." : "xxxx xxxx xxxx xxxx"}"></label>
       <details>
@@ -766,6 +784,8 @@ function htmlMaster() {
     <div class="hint">${esc(stamp(item.created_at))} · ${esc(maskAddress(item.actor))} · ${esc(item.action)} · ${esc(maskAddress(item.detail || ""))}</div>`).join("") || `<p>No audit events yet.</p>`;
   const drive = (state.health && state.health.drive) || {};
   return `
+    ${htmlMailboxTests()}
+    ${htmlAccountLimits()}
     <section class="card glass stack" id="approval-queue"><h3>Access approval queue${waitingCount ? ` · ${waitingCount} to approve` : ""}</h3>${approvals}</section>
     ${htmlMailboxSetup()}
     <section class="card glass stack" id="admin-setup">
@@ -800,6 +820,63 @@ function htmlMaster() {
       <div class="row"><button class="btn btn-primary" type="button" data-action="save-google">Save Google sign-in</button></div>
     </section>
     ${htmlDeskForm()}`;
+}
+
+function htmlMailboxTests() {
+  const rows = state.mailboxTests || [];
+  const listed = rows.map((row) => `
+    <article class="stack">
+      <div class="spread">
+        <div><strong>${esc(row.display_name || row.email || "Mailbox")}</strong><div class="hint">${esc(row.email || "")}</div></div>
+        ${statusBadge(row.working ? "working" : "not working")}
+      </div>
+      <p class="${row.working ? "hint" : "fail-reason"}">${esc(row.reason || "")}</p>
+    </article>`).join("");
+  const summary = rows.length
+    ? `<p class="hint">${rows.filter((row) => row.working).length} working · ${rows.filter((row) => !row.working).length} not working</p>`
+    : `<p class="hint">Press Test mailboxes to check every saved account. A mailbox that cannot sign in shows the reason. No message is sent.</p>`;
+  return `
+    <section class="card glass stack" id="test-mailboxes">
+      <div class="spread">
+        <h3>Test mailboxes</h3>
+        <button class="btn btn-primary" type="button" data-action="test-all-mailboxes" ${state.testingMailboxes ? "disabled" : ""}>${state.testingMailboxes ? "Testing mailboxes…" : "Test mailboxes"}</button>
+      </div>
+      ${summary}
+      ${listed}
+    </section>`;
+}
+
+function mailboxKind(sender) {
+  const email = String((sender && (sender.email || sender.user)) || "").toLowerCase();
+  const domain = email.includes("@") ? email.split("@")[1] : "";
+  const host = String((sender && sender.host) || "").toLowerCase();
+  if (domain === "gmail.com" || domain === "googlemail.com") return "gmail";
+  if (domain || host.includes("gmail") || host.includes("google")) return "workspace";
+  return "other";
+}
+
+function htmlAccountLimits() {
+  const rows = state.masterSenders || [];
+  const gmailCount = rows.filter((item) => mailboxKind(item) === "gmail").length;
+  const workspaceCount = rows.filter((item) => mailboxKind(item) === "workspace").length;
+  const gmail = Number((state.health && state.health.gmail_daily_cap) || 200);
+  const workspace = Number((state.health && state.health.workspace_daily_cap) || 800);
+  return `
+    <section class="card glass stack" id="account-limits">
+      <h3>Account limits</h3>
+      <p class="hint">Set one daily limit for every Gmail account and one for every Workspace account. Each mailbox stops when it reaches that number in 24 hours.</p>
+      <div class="config-grid">
+        <label>All Gmail accounts${gmailCount ? ` · ${gmailCount}` : ""}
+          <input id="gmail-daily-cap" class="input" type="number" min="1" max="10000" value="${esc(gmail)}">
+        </label>
+        <label>All Workspace accounts${workspaceCount ? ` · ${workspaceCount}` : ""}
+          <input id="workspace-daily-cap" class="input" type="number" min="1" max="10000" value="${esc(workspace)}">
+        </label>
+      </div>
+      <div class="row">
+        <button class="btn btn-primary" type="button" data-action="save-account-limits">Save account limits</button>
+      </div>
+    </section>`;
 }
 
 function htmlDeskForm() {
@@ -2034,6 +2111,9 @@ async function refreshLedger() {
 async function tick() {
   if (!state.token || document.hidden) return;
   try {
+    const me = await api("/api/me");
+    const roleChanged = !state.user || state.user.role !== (me.user && me.user.role);
+    state.user = me.user;
     state.health = await api("/api/health");
     const moved = await refreshUi();
     await refreshLedger();
@@ -2046,7 +2126,7 @@ async function tick() {
     const signature = campaignSignature() + (state.view === "master" ? approvalSignature() : "") + (state.monitor ? state.monitor.campaigns.length : "");
     const idle = Date.now() - state.lastInteract > 2500;
     const typing = document.activeElement && document.activeElement.closest("input, textarea, select");
-    if ((signature !== before || moved) && idle && !typing && !deskDirty() && !assignDirty() && ["home", "campaigns", "history", "master"].includes(state.view)) {
+    if ((signature !== before || moved || roleChanged) && idle && !typing && !deskDirty() && !assignDirty() && !state.testingMailboxes && ["home", "campaigns", "history", "master"].includes(state.view)) {
       state.campSig = signature;
       renderView();
     } else state.campSig = signature;
@@ -2578,8 +2658,48 @@ const actions = {
       return;
     }
     state.view = next;
+    state.focus = el.dataset.focus || "";
     if (state.view === "master" || state.view === "config") await refreshMaster();
     renderView();
+  },
+  async "save-account-limits"() {
+    const gmail = Number((document.getElementById("gmail-daily-cap") || {}).value);
+    const workspace = Number((document.getElementById("workspace-daily-cap") || {}).value);
+    if (!Number.isInteger(gmail) || gmail < 1 || gmail > 10000) throw new Error("Enter a Gmail daily limit from 1 to 10000.");
+    if (!Number.isInteger(workspace) || workspace < 1 || workspace > 10000) throw new Error("Enter a Workspace daily limit from 1 to 10000.");
+    const data = await api("/api/master/account-limits", {
+      method: "POST",
+      body: JSON.stringify({ gmail_daily_cap: gmail, workspace_daily_cap: workspace }),
+    });
+    if (state.health) {
+      state.health.gmail_daily_cap = data.gmail_daily_cap;
+      state.health.workspace_daily_cap = data.workspace_daily_cap;
+    }
+    state.masterSenders = data.senders || state.masterSenders;
+    await refreshCatalog();
+    state.focus = "account-limits";
+    renderView();
+    toast(`Gmail accounts: ${data.gmail_daily_cap} a day (${data.gmail_count || 0}). Workspace accounts: ${data.workspace_daily_cap} a day (${data.workspace_count || 0}).`);
+  },
+  async "test-all-mailboxes"() {
+    if (state.testingMailboxes) return;
+    state.testingMailboxes = true;
+    state.view = "master";
+    state.focus = "test-mailboxes";
+    renderView();
+    try {
+      const data = await api("/api/master/senders/test-all", { method: "POST", body: "{}" });
+      state.mailboxTests = data.results || [];
+      const failing = Number(data.failing_count || 0);
+      const working = Number(data.working_count || 0);
+      if (!data.tested) toast("No mailing accounts are saved yet.");
+      else if (failing) toast(`${working} working, ${failing} not working. The reason is under each mailbox.`, "warn");
+      else toast(`All ${working} mailboxes are working.`);
+    } finally {
+      state.testingMailboxes = false;
+      state.focus = "test-mailboxes";
+      renderView();
+    }
   },
   "auth-mode"(el) {
     showOtp(false, "");
