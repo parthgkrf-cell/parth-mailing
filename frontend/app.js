@@ -390,8 +390,9 @@ function htmlRecipients() {
       <div id="dropzone" class="dropzone">
         <p>Or drop .xlsx, .xls, or .csv files here</p>
         <p class="hint">In the message, {Affiliation} uses that column’s name and {E} uses column E. The same works for every Excel column.</p>
-        <button class="btn btn-primary" type="button" data-action="browse-excel">Browse files</button>
-        <input id="excel-input" class="hidden" type="file" accept=".xlsx,.xls,.csv,.txt" multiple>
+        <button class="btn btn-primary" type="button" data-action="browse-excel">Browse file</button>
+        <input id="excel-input" class="hidden" type="file" accept=".xlsx,.xls,.csv,.txt">
+        <p class="hint">Browse file replaces the list. Only the file you choose is used.</p>
       </div>
       <div class="row">
         <label class="check-line"><input type="radio" name="import-mode" value="append" checked> Append</label>
@@ -1653,10 +1654,13 @@ async function fetchSheet() {
   rememberSheetAddresses();
 }
 
-async function importFiles(fileList) {
-  const files = [...fileList].filter(Boolean);
+async function importFiles(fileList, options) {
+  let files = [...fileList].filter(Boolean);
+  if (options && options.onlyFile) files = files.slice(0, 1);
   if (!files.length) return;
-  const mode = (document.querySelector('input[name="import-mode"]:checked') || {}).value || "append";
+  const mode = (options && options.replace)
+    ? "replace"
+    : ((document.querySelector('input[name="import-mode"]:checked') || {}).value || "append");
   resetImport(mode);
   state.importing = true;
   paintChrome();
@@ -3050,7 +3054,7 @@ document.addEventListener("change", async (event) => {
   if (event.target.id === "excel-input") {
     const files = [...event.target.files];
     event.target.value = "";
-    try { await importFiles(files); } catch (error) { toast(error.message, "danger"); }
+    try { await importFiles(files, { replace: true, onlyFile: true }); } catch (error) { toast(error.message, "danger"); }
   }
   if (event.target.id === "schedule-on") {
     const on = event.target.checked;

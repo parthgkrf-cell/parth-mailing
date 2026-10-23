@@ -55,7 +55,7 @@ EMAIL_RE = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.I)
 REPORT_HEADERS = [
     "Receiver email", "Sender email", "First Name", "Last Name", "Company", "Custom1",
     "Status", "From name", "Account Email", "Sent by", "Subject",
-    "Sent time", "Timestamp (UTC)", "SMTP Code", "Error",
+    "Sent time", "Timestamp (UTC)", "SMTP Code", "Reason",
 ]
 
 if getattr(sys, "frozen", False):
@@ -3234,79 +3234,32 @@ def next_ready_at(campaign_id, sender_id=None):
 
 
 DNS_RETRY = {}
-RETIRED_MAILBOXES = set()
+_REPORT_LOCK = threading.Lock()
 
 
-def retire_key(campaign_id, sender_id):
-    return f"{campaign_id}:{sender_id or ''}"
-
-
-def campaign_sender_ids(campaign):
-    try:
-        pool_ids = json.loads((campaign or {}).get("sender_ids_json") or "[]")
-    except (TypeError, json.JSONDecodeError):
-        pool_ids = []
-    if not isinstance(pool_ids, list):
-        pool_ids = []
-    pool_ids = [str(item) for item in pool_ids if item]
-    if not pool_ids and (campaign or {}).get("sender_id"):
-        pool_ids = [str(campaign["sender_id"])]
-    return pool_ids
-
-
-def mailbox_has_room(sender):
-    if not sender or not sender.get("user"):
-        return False
-    try:
-        cap = mailbox_daily_cap(sender)
-    except Exception:
-        return False
-    return pace_used(sender["user"]) < cap
-
-
-def pass_failed_mailbox(campaign, sender_id, reason):
-    """Leave a failed mailbox and give its remaining rows to the next one."""
+def note_mailbox_rows(campaign, sender_id, reason):
+    """Record a reason on this mailbox's remaining rows and keep each Excel account."""
     if not campaign or not campaign.get("id"):
         return 0
-    RETIRED_MAILBOXES.add(retire_key(campaign["id"], sender_id))
-    others = []
-    for item_id in campaign_sender_ids(campaign):
-        if item_id == sender_id or retire_key(campaign["id"], item_id) in RETIRED_MAILBOXES:
-            continue
-        sender = sender_by_id(item_id)
-        if sender and mailbox_has_room(sender):
-            others.append(sender)
     reason = str(reason or "This mailbox could not send.")[:500]
     with db() as conn:
-        rows = list(conn.execute(
+        cur = conn.execute(
             """
-            SELECT id FROM recipients
+            UPDATE recipients
+            SET status='FAILED', error=?, smtp_code='ACCOUNT'
             WHERE campaign_id=? AND status='QUEUED' AND IFNULL(sender_id,'')=?
-            ORDER BY id
             """,
-            (campaign["id"], sender_id or ""),
-        ))
-        if not rows:
-            return 0
-        if not others:
-            conn.execute(
-                """
-                UPDATE recipients
-                SET status='FAILED', error=?, smtp_code='ACCOUNT'
-                WHERE campaign_id=? AND status='QUEUED' AND IFNULL(sender_id,'')=?
-                """,
-                (reason, campaign["id"], sender_id or ""),
-            )
+            (reason, campaign["id"], sender_id or ""),
+        )
+        count = cur.rowcount
+        if count:
             recompute_counts(conn, campaign["id"])
-            add_audit(conn, "relay", "mailbox_skipped", f"{campaign['id']} {sender_id} {len(rows)} not delivered")
-            log(f"Mailbox stopped. {len(rows)} left on that account were marked not delivered so the list can finish.")
-            return len(rows)
-        for index, row in enumerate(rows):
-            nxt = others[index % len(others)]
-            conn.execute("UPDATE recipients SET sender_id=? WHERE id=?", (nxt["id"], row["id"]))
-        add_audit(conn, "relay", "mailbox_skipped", f"{campaign['id']} {sender_id} {len(rows)} moved")
-    log(f"Mailbox stopped. {len(rows)} left moved to the next mailbox.")
-    return len(rows)
+            add_audit(conn, "relay", "mailbox_noted", f"{campaign['id']} {sender_id} {count}")
+    if count:
+        write_report(campaign["id"], upload=False)
+        noun = "row" if count == 1 else "rows"
+        log(f"{count} {noun} kept their Excel account and were marked not delivered.")
+    return count
 
 
 def network_lookup_failed(text):
@@ -3343,12 +3296,8 @@ def save_outcome(campaign, recipient, outcome, sender):
                 (normalize_email(sender["user"]), now),
             )
             remember_shared_send(sender["user"], now)
-    if outcome["status"] not in ("SENT", "DRAFTED", "QUEUED") and account_error_is_fatal(outcome.get("error") or ""):
-        pass_failed_mailbox(
-            campaign,
-            (sender or {}).get("id") or recipient.get("sender_id") or "",
-            outcome.get("error") or "This mailbox could not send.",
-        )
+    if outcome["status"] in ("FAILED", "BOUNCED"):
+        write_report(campaign["id"], upload=False)
     if outcome["status"] == "SENT" and not outcome.get("simulated"):
         with db() as conn:
             conn.execute("DELETE FROM pace WHERE sent_at < ?", (time.time() - 86400 * 2,))
@@ -3493,22 +3442,26 @@ def report_table(conn, campaign_id):
     return headers, rows
 
 
-def write_report(campaign_id):
-    with db() as conn:
-        camp = conn.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
-        if not camp:
-            return
-        headers, rows = report_table(conn, campaign_id)
-    payload = xlsx_writer.workbook_bytes(headers, rows)
-    path = os.path.join(REPORT_DIR, f"{campaign_id}.xlsx")
-    with open(path, "wb") as handle:
-        handle.write(payload)
-    with db() as conn:
-        conn.execute("UPDATE campaigns SET report_path=? WHERE id=?", (path, campaign_id))
-        add_audit(conn, "relay", "report_ready", campaign_id)
-    day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
-    queue_drive_upload(path, ["Campaign_Reports", day], campaign_id, "drive_report_url")
-    log(f"Report ready for {campaign_id}")
+def write_report(campaign_id, upload=True):
+    with _REPORT_LOCK:
+        with db() as conn:
+            camp = conn.execute("SELECT * FROM campaigns WHERE id=?", (campaign_id,)).fetchone()
+            if not camp:
+                return
+            headers, rows = report_table(conn, campaign_id)
+        payload = xlsx_writer.workbook_bytes(headers, rows)
+        os.makedirs(REPORT_DIR, exist_ok=True)
+        path = os.path.join(REPORT_DIR, f"{campaign_id}.xlsx")
+        with open(path, "wb") as handle:
+            handle.write(payload)
+        with db() as conn:
+            conn.execute("UPDATE campaigns SET report_path=? WHERE id=?", (path, campaign_id))
+            if upload:
+                add_audit(conn, "relay", "report_ready", campaign_id)
+    if upload:
+        day = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")
+        queue_drive_upload(path, ["Campaign_Reports", day], campaign_id, "drive_report_url")
+        log(f"Report ready for {campaign_id}")
 
 
 def finish_if_drained(campaign_id):
@@ -3561,10 +3514,8 @@ def process_account_send(campaign_id, sender_id):
         return
     sender = sender_by_id(sender_id) or sender_by_id(camp.get("sender_id"))
     key = sleep_key(campaign_id, sender_id)
-    if retire_key(campaign_id, sender_id) in RETIRED_MAILBOXES:
-        return
     if not sender:
-        pass_failed_mailbox(camp, sender_id, "This mailbox is no longer on the desk.")
+        note_mailbox_rows(camp, sender_id, "This mailbox is no longer on the desk.")
         finish_if_drained(camp["id"])
         return
     with db() as conn:
@@ -3600,7 +3551,7 @@ def process_account_send(campaign_id, sender_id):
         cap = min(mailbox_daily_cap(sender), int(limits.get("per_day") or mailbox_daily_cap(sender)))
         if used >= cap:
             log(f"{sender['user']} reached the 24-hour mailbox cap of {cap}")
-            pass_failed_mailbox(camp, sender["id"], f"{sender['user']} reached the 24-hour mailbox cap of {cap}.")
+            note_mailbox_rows(camp, sender["id"], f"{sender['user']} reached the 24-hour mailbox cap of {cap}.")
             finish_if_drained(camp["id"])
             return
     clear_hold(camp["id"])
@@ -3627,8 +3578,7 @@ def process_account_send(campaign_id, sender_id):
             outcome["status"] = "FAILED"
             outcome["error"] = "The computer could not find the mail server. Check the internet connection, then start sending again."
     save_outcome(camp, recipient, outcome, sender)
-    if retire_key(camp["id"], sender.get("id")) not in RETIRED_MAILBOXES:
-        after_send_delay(camp, sender)
+    after_send_delay(camp, sender)
     label = "SIMULATED" if outcome.get("simulated") else outcome["status"]
     verb = "draft" if campaign_action(camp) == "draft" else "send"
     log(f"{label} [{verb}] {sender['user']} -> {recipient['email']} {outcome.get('code') or ''} {(outcome.get('error') or '')[:160]}")
@@ -3671,13 +3621,7 @@ def engine_dispatch():
         if not sender_ids:
             finish_if_drained(camp["id"])
             continue
-        active_ids = [item for item in sender_ids if retire_key(camp["id"], item) not in RETIRED_MAILBOXES]
-        if not active_ids:
-            for sender_id in sender_ids:
-                pass_failed_mailbox(camp, sender_id, "This mailbox stopped, so the rest of its list was not sent.")
-            finish_if_drained(camp["id"])
-            continue
-        for sender_id in active_ids:
+        for sender_id in sender_ids:
             key = sleep_key(camp["id"], sender_id)
             if SLEEP_UNTIL.get(key, 0) > now:
                 continue
