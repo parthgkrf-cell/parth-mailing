@@ -282,11 +282,19 @@ function mailboxQuota(sender) {
   return rows.find((item) => item.id === sender.id) || null;
 }
 
+function limitNote() {
+  const gmail = Number((state.health && state.health.gmail_daily_cap) || 200);
+  const workspace = Number((state.health && state.health.workspace_daily_cap) || 800);
+  const gap = Number((state.health && state.health.gmail_gap_seconds) || 90);
+  const workspaceGap = Number((state.health && state.health.workspace_gap_seconds) || 4);
+  return `Gmail waits at least ${gap} seconds and stops at ${gmail.toLocaleString()} in 24 hours. Workspace waits at least ${workspaceGap} seconds and stops at ${workspace.toLocaleString()}.`;
+}
+
 function mailboxQuotaLine(sender) {
   const box = mailboxQuota(sender);
   if (!box) return sender.status === "approved" ? "Assigned to this account" : "Waiting on admin";
-  const kind = box.kind === "gmail" ? "Gmail 400" : "Workspace 1,800";
-  return `${Number(box.sent || 0).toLocaleString()} sent · ${Number(box.left || 0).toLocaleString()} left of ${Number(box.cap || 0).toLocaleString()} · ${kind}`;
+  const label = box.kind === "gmail" ? "Gmail" : "Workspace";
+  return `${Number(box.sent || 0).toLocaleString()} sent · ${Number(box.left || 0).toLocaleString()} left of ${Number(box.cap || 0).toLocaleString()} · ${label}`;
 }
 
 function htmlHome() {
@@ -337,7 +345,7 @@ function htmlHome() {
       <article class="card glass stat">
         <span class="hint">Total email limit</span>
         <strong>${Number(ledger.total_limit || 0).toLocaleString()}</strong>
-        <span class="hint">Gmail 400 · Workspace 1,800</span>
+        <span class="hint">Gmail ${Number((state.health && state.health.gmail_daily_cap) || 200).toLocaleString()} · Workspace ${Number((state.health && state.health.workspace_daily_cap) || 800).toLocaleString()}</span>
       </article>
       <article class="card glass stat">
         <span class="hint">Total sent email</span>
@@ -360,7 +368,7 @@ function htmlHome() {
       <article class="card glass stat"><span class="hint">Approved senders</span><strong>${approved.length}</strong></article>
       <article class="card glass stat"><span class="hint">Waiting on admin</span><strong>${pending.length}</strong></article>
     </div>
-    <p class="hint">Each Gmail mailbox can send 400 emails in 24 hours. Each Workspace mailbox can send 1,800. The three totals add the mailboxes assigned to this login.</p>
+    <p class="hint">Each Gmail mailbox can send ${Number((state.health && state.health.gmail_daily_cap) || 200).toLocaleString()} emails in 24 hours. Each Workspace mailbox can send ${Number((state.health && state.health.workspace_daily_cap) || 800).toLocaleString()}. The totals add the mailboxes assigned to this login. The same count is shared from Drive, so another computer cannot pass the cap.</p>
     <section class="stack"><h3>Recent campaigns</h3>${recent}</section>`;
 }
 
@@ -377,7 +385,7 @@ function htmlRecipients() {
       <div class="row">
         <button class="btn btn-primary" type="button" data-action="fetch-sheet">Fetch sheet</button>
       </div>
-      <p class="hint">Receiver email is who gets the message. Sender email, or Account Email, is the mailbox that sends it, such as parth@gr-conferences.com. Sender Name is the name people see, such as ICTCS Conference Support. CC on that row is copied on the message. The mailbox label is not used when Sender Name is filled in. Sending starts when you press Start sending. A later S_Date and S_Time waits until that time. Gmail waits 90 seconds and stops at 400 in 24 hours. Workspace waits 4 seconds and stops at 1,800. Sender email must be a mailbox this login is allowed to use.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
+      <p class="hint">Receiver email is who gets the message. Sender email, or Account Email, is the mailbox that sends it, such as parth@gr-conferences.com. Sender Name is the name people see, such as ICTCS Conference Support. CC on that row is copied on the message. The mailbox label is not used when Sender Name is filled in. Sending starts when you press Start sending. Open When sending starts in the composer to choose a later time. A later S_Date and S_Time waits until that time. ${limitNote()} Sender email must be a mailbox this login is allowed to use.${state.health && state.health.drive && state.health.drive.client_email ? ` Share a private sheet with ${esc(state.health.drive.client_email)}.` : ""}</p>
       <div id="dropzone" class="dropzone">
         <p>Or drop .xlsx, .xls, or .csv files here</p>
         <p class="hint">In the message, {Affiliation} uses that column’s name and {E} uses column E. The same works for every Excel column.</p>
@@ -538,7 +546,7 @@ function htmlSenderCard(sender, index, open) {
       <div class="config-grid">
         <label>From name<input class="input" data-sender-name value="${esc(item.display_name || "")}" placeholder="Parth Mailing"></label>
         <label>Mailing email<input class="input" data-sender-email value="${esc(item.email || "")}" placeholder="send@gr-conferences.com"></label>
-        <label>Daily limit<input class="input" data-sender-cap type="number" min="1" max="1800" value="${esc(item.daily_cap || item.provider_cap || "")}" placeholder="400 Gmail / 1800 Workspace"></label>
+        <label>Daily limit<input class="input" data-sender-cap type="number" min="1" max="800" value="${esc(item.daily_cap || item.provider_cap || "")}" placeholder="200 Gmail / 800 Workspace"></label>
       </div>
       <label>16-digit Google app password<input class="input" data-sender-password type="text" autocomplete="off" spellcheck="false" maxlength="19" placeholder="${item.has_password ? "Saved on this computer. Paste a new 16-digit code only to replace it." : "xxxx xxxx xxxx xxxx"}"></label>
       <details>
@@ -1783,14 +1791,14 @@ async function sendCampaign(action, options) {
     }
     const found = sheetTimes(rows, zone);
     const later = found.filter((item) => item.unix > scheduleAt + 30).length;
-    scheduleNote = `Nothing sends before ${date} ${time} (${zone}). Gmail then waits at least 90 seconds between its own emails and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800. Leave Start-Mailing-Suite.bat open.`;
+    scheduleNote = `Nothing sends before ${date} ${time} (${zone}). ${limitNote()} Leave Start-Mailing-Suite.bat open.`;
     if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait until that time.`;
   } else {
     const found = sheetTimes(rows, zone);
     const later = found.filter((item) => item.unix > Math.floor(Date.now() / 1000) + 30).length;
     scheduleNote = "Sending starts now.";
     if (later) scheduleNote += ` ${later} rows have a later S_Date and S_Time and wait until that time.`;
-    scheduleNote += " Gmail waits at least 90 seconds between its own emails and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800.";
+    scheduleNote += ` ${limitNote()}`;
   }
   const pace = {
     delay_min_seconds: Number(document.getElementById("delay-min").value),
@@ -1803,8 +1811,8 @@ async function sendCampaign(action, options) {
   const mailboxLine = mode === "draft"
     ? `IMAP drafts on ${sender && (sender.display_name || sender.email) || "the selected mailbox"}.`
     : (senders.length > 1
-      ? `${senders.length} assigned mailboxes send in parallel. Each Gmail address waits at least 90 seconds and stops at 400 in 24 hours. Each Workspace address waits at least 4 seconds and stops at 1,800.`
-      : `One mailbox sends one by one. Gmail waits at least 90 seconds and stops at 400 in 24 hours. Workspace waits at least 4 seconds and stops at 1,800.`);
+      ? `${senders.length} assigned mailboxes send in parallel. ${limitNote()}`
+      : `One mailbox sends one by one. ${limitNote()}`);
   const sheetAccounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
   const sheetNames = [...new Set(rows.map((row) => rowSenderName(row)).filter(Boolean))];
   const sheetCopies = [...new Set(rows.map((row) => looseField(row, CC_KEYS)).filter(Boolean))];

@@ -48,8 +48,8 @@ from zoneinfo import ZoneInfo
 import drive_sync
 import xlsx_writer
 
-GMAIL_DAILY_CAP = 400
-WORKSPACE_DAILY_CAP = 1800
+GMAIL_DAILY_CAP = 200
+WORKSPACE_DAILY_CAP = 800
 GMAIL_CONSUMER_GAP = 90.0
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.I)
 REPORT_HEADERS = [
@@ -497,7 +497,7 @@ def count_sent(conn, owner=None, since=None):
 def mailbox_quota(conn, user):
     """Daily room across the mailboxes this login can send from.
 
-    Gmail is 400 and Google Workspace is 1,800 unless a lower cap is saved
+    Gmail is 200 and Google Workspace is 800 unless a lower cap is saved
     on that mailbox. Sent and left use the last 24 hours for each mailbox.
     """
     cutoff = time.time() - 86400
@@ -1289,9 +1289,34 @@ def otp_sender():
     return None
 
 
+_SETUP_LOCK = threading.Lock()
+
+
+def setup_local_mailboxes(reason="startup"):
+    """Load every mailbox onto this computer from the saved sheet."""
+    url = str(load_config().get("mailbox_sheet_url") or "").strip()
+    if not url:
+        if reason == "startup":
+            log("This computer has no saved mailing sheet. Open Admin and choose Fetch mailing accounts.")
+        return None
+    with _SETUP_LOCK:
+        try:
+            result = apply_mailbox_sheet(url)
+        except ApiError as exc:
+            log(f"Mailbox setup on this computer failed: {exc.message}")
+            return None
+    ready = len(configured_senders())
+    if reason == "startup" or result.get("changed"):
+        log(f"This computer is set up with {ready} mailing accounts.")
+    return result
+
+
 def refresh_otp_sender():
     url = str(load_config().get("mailbox_sheet_url") or "").strip()
     if not url:
+        return otp_sender()
+    if not otp_sender():
+        setup_local_mailboxes("sign-in")
         return otp_sender()
     try:
         apply_mailbox_sheet(url, OTP_FROM)
@@ -2960,6 +2985,139 @@ def mark_pace(sender_email):
         conn.execute("DELETE FROM pace WHERE sent_at < ?", (time.time() - 86400 * 2,))
 
 
+SEND_LOG_DIR = "Sending_Log"
+SEND_LOG_PREFIX = "sending-log-"
+_SEND_LOG_GUARD = threading.Lock()
+_SEND_LOG_SYNCED = 0.0
+_SEND_LOG_DIRTY = False
+
+
+def send_log_name():
+    host = re.sub(r"[^A-Za-z0-9_-]+", "-", socket.gethostname() or "desk").strip("-")[:40]
+    return f"{SEND_LOG_PREFIX}{host or 'desk'}.jsonl"
+
+
+def local_send_log_path():
+    return os.path.join(DATA_DIR, send_log_name())
+
+
+def remember_shared_send(sender_email, stamp):
+    """Keep one line per send so every computer can count the same 24 hours."""
+    global _SEND_LOG_DIRTY
+    email = normalize_email(sender_email)
+    if not email:
+        return
+    line = json.dumps({"email": email, "at": round(float(stamp), 3)}, separators=(",", ":"))
+    os.makedirs(DATA_DIR, exist_ok=True)
+    with _SEND_LOG_GUARD:
+        with open(local_send_log_path(), "a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+        _SEND_LOG_DIRTY = True
+
+
+def publish_send_log():
+    """Upload this computer's send log. Other desks read it before the next send."""
+    global _SEND_LOG_DIRTY
+    with _SEND_LOG_GUARD:
+        if not _SEND_LOG_DIRTY:
+            return
+        path = local_send_log_path()
+        try:
+            with open(path, "r", encoding="utf-8") as handle:
+                text = handle.read()
+        except OSError:
+            return
+        _SEND_LOG_DIRTY = False
+    account, settings = load_service_account()
+    if not account:
+        return
+    try:
+        drive_sync.upsert_text(
+            account,
+            [SEND_LOG_DIR],
+            send_log_name(),
+            text,
+            root_name=settings["root_name"],
+            parent_folder_id=settings["parent"],
+        )
+    except Exception as exc:
+        with _SEND_LOG_GUARD:
+            _SEND_LOG_DIRTY = True
+        log(f"Send log upload skipped: {exc}")
+
+
+def merge_shared_sends(lines):
+    cutoff = time.time() - 86400
+    rows = []
+    for line in lines:
+        try:
+            item = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        email = normalize_email(item.get("email"))
+        try:
+            stamp = float(item.get("at") or 0)
+        except (TypeError, ValueError):
+            continue
+        if email and stamp >= cutoff:
+            rows.append((email, stamp))
+    if not rows:
+        return 0
+    added = 0
+    with db() as conn:
+        for email, stamp in rows:
+            cur = conn.execute(
+                """
+                INSERT INTO pace (sender_email, sent_at)
+                SELECT ?, ? WHERE NOT EXISTS (
+                    SELECT 1 FROM pace WHERE sender_email=? AND ABS(sent_at - ?) < 1
+                )
+                """,
+                (email, stamp, email, stamp),
+            )
+            added += cur.rowcount
+    return added
+
+
+def sync_shared_send_log(force=False):
+    """Pull every computer's send log so a mailbox cannot pass its 24-hour cap."""
+    global _SEND_LOG_SYNCED
+    now = time.time()
+    if not force and now - _SEND_LOG_SYNCED < 15:
+        return
+    account, settings = load_service_account()
+    _SEND_LOG_SYNCED = now
+    if not account:
+        return
+    try:
+        texts = drive_sync.read_text_files(
+            account,
+            [SEND_LOG_DIR],
+            SEND_LOG_PREFIX,
+            root_name=settings["root_name"],
+            parent_folder_id=settings["parent"],
+        )
+    except Exception as exc:
+        log(f"Send log fetch skipped: {exc}")
+        return
+    lines = []
+    for text in texts:
+        lines.extend(text.splitlines())
+    added = merge_shared_sends(lines)
+    if added:
+        log(f"Send log added {added} sends from other computers")
+
+
+def shared_log_loop():
+    while not STOP_ENGINE.is_set():
+        try:
+            publish_send_log()
+            sync_shared_send_log(force=True)
+        except Exception:
+            log(traceback.format_exc())
+        STOP_ENGINE.wait(20)
+
+
 def recent_mailbox_sends(sender_email, since):
     with db() as conn:
         rows = conn.execute(
@@ -3096,6 +3254,7 @@ def save_outcome(campaign, recipient, outcome, sender):
                 "INSERT INTO pace (sender_email, sent_at) VALUES (?, ?)",
                 (normalize_email(sender["user"]), now),
             )
+            remember_shared_send(sender["user"], now)
         if outcome["status"] != "SENT" and account_error_is_fatal(outcome.get("error") or ""):
             conn.execute(
                 "UPDATE campaigns SET status='paused', hold_reason=? WHERE id=? AND status='running'",
@@ -3330,9 +3489,10 @@ def process_account_send(campaign_id, sender_id):
         return
     company_cap = int(load_desk_ui().get("global_daily_cap") or 0)
     if company_cap > 0:
+        sync_shared_send_log()
         with db() as conn:
             company_used = conn.execute(
-                "SELECT COUNT(*) AS n FROM recipients WHERE status='SENT' AND sent_at>=?",
+                "SELECT COUNT(*) AS n FROM pace WHERE sent_at>=?",
                 (time.time() - 86400,),
             ).fetchone()["n"]
         if company_used >= company_cap:
@@ -3344,6 +3504,7 @@ def process_account_send(campaign_id, sender_id):
         SLEEP_UNTIL[key] = time.time() + min(wait, 30)
         return
     if live_delivery(sender) and campaign_action(camp) != "draft":
+        sync_shared_send_log()
         used = pace_used(sender["user"])
         cap = min(mailbox_daily_cap(sender), int(limits.get("per_day") or mailbox_daily_cap(sender)))
         if used >= cap:
@@ -3886,6 +4047,10 @@ class Handler(BaseHTTPRequestHandler):
                 "admin_email": ADMIN_EMAIL,
                 "google_client_id": google_client_id(),
                 "drive": drive_status(),
+                "gmail_daily_cap": GMAIL_DAILY_CAP,
+                "workspace_daily_cap": WORKSPACE_DAILY_CAP,
+                "gmail_gap_seconds": int(GMAIL_CONSUMER_GAP),
+                "workspace_gap_seconds": 4,
                 "active_campaigns": active,
             })
             return
@@ -4205,6 +4370,7 @@ class Handler(BaseHTTPRequestHandler):
             add_audit(conn, email, "signed_in_admin", "")
         with db() as conn:
             row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        setup_local_mailboxes("sign-in")
         self.send_json(200, {
             "ok": True,
             "token": issue_token(email),
@@ -4260,6 +4426,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 add_audit(conn, email, "signed_in", "password")
                 fresh = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+                setup_local_mailboxes("sign-in")
                 self.send_json(200, {
                     "ok": True,
                     "token": issue_token(email),
@@ -4404,6 +4571,7 @@ class Handler(BaseHTTPRequestHandler):
                     account = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
         if failure:
             raise ApiError(failure, failure_code)
+        setup_local_mailboxes("sign-in")
         self.send_json(200, {
             "ok": True,
             "token": issue_token(email),
@@ -4423,6 +4591,7 @@ class Handler(BaseHTTPRequestHandler):
             )
             add_audit(conn, email, "signed_in_google", role_for(email))
             row = conn.execute("SELECT * FROM users WHERE email=?", (email,)).fetchone()
+        setup_local_mailboxes("sign-in")
         self.send_json(200, {
             "ok": True,
             "token": issue_token(email),
@@ -5379,13 +5548,13 @@ def main():
     init_db()
     sync_admin_sender()
     recover_incomplete()
-    if str(load_config().get("mailbox_sheet_url") or "").strip():
-        refresh_otp_sender()
+    setup_local_mailboxes("startup")
     config = load_config()
     host = str((config.get("server") or {}).get("host") or "127.0.0.1")
     port = int((config.get("server") or {}).get("port") or 8787)
     engine = threading.Thread(target=engine_loop, name="campaign-engine", daemon=True)
     engine.start()
+    threading.Thread(target=shared_log_loop, name="send-log", daemon=True).start()
     servers, errors = bind_servers(host, port)
     if not servers:
         log("Cannot listen. " + "; ".join(errors))

@@ -190,6 +190,101 @@ def upload_file(local_path, service_account, folder_names, root_name="ParthMaili
     return created.get("webViewLink") or f"https://drive.google.com/file/d/{created['id']}/view"
 
 
+def _folder_chain(token, folder_names, root_name, parent_folder_id):
+    folder_id = parent_folder_id or None
+    for name in [root_name, *folder_names]:
+        if name:
+            folder_id = _ensure_folder(token, name, folder_id)
+    return folder_id
+
+
+def _find_file(token, folder_id, filename):
+    query = (
+        f"name = '{_escape(filename)}' and '{_escape(folder_id)}' in parents "
+        "and trashed = false"
+    )
+    url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode({
+        "q": query,
+        "fields": "files(id,name)",
+        "pageSize": "5",
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    })
+    found = _request(url, token=token, method="GET")
+    files = found.get("files") or []
+    return files[0]["id"] if files else ""
+
+
+def upsert_text(service_account, folder_names, filename, text, root_name="ParthMailing_Storage", parent_folder_id=""):
+    """Create or replace a text file in the storage folder."""
+    token = _access_token(service_account)
+    folder_id = _folder_chain(token, folder_names, root_name, parent_folder_id)
+    content = str(text or "").encode("utf-8")
+    existing = _find_file(token, folder_id, filename)
+    if existing:
+        _request(
+            "https://www.googleapis.com/upload/drive/v3/files/"
+            f"{urllib.parse.quote(existing)}?uploadType=media&supportsAllDrives=true",
+            token=token,
+            data=content,
+            headers={"Content-Type": "text/plain; charset=UTF-8"},
+            method="PATCH",
+        )
+        return existing
+    boundary = "parth" + _b64url(os.urandom(8))
+    meta = json.dumps({"name": filename, "parents": [folder_id]})
+    body = (
+        f"--{boundary}\r\n"
+        "Content-Type: application/json; charset=UTF-8\r\n\r\n"
+        f"{meta}\r\n"
+        f"--{boundary}\r\n"
+        "Content-Type: text/plain; charset=UTF-8\r\n\r\n"
+    ).encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    created = _request(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=multipart&supportsAllDrives=true&fields=id",
+        token=token,
+        data=body,
+        headers={"Content-Type": f"multipart/related; boundary={boundary}"},
+        method="POST",
+    )
+    return created.get("id") or ""
+
+
+def read_text_files(service_account, folder_names, prefix, root_name="ParthMailing_Storage", parent_folder_id=""):
+    """Download every text file in a folder whose name starts with prefix."""
+    token = _access_token(service_account)
+    folder_id = _folder_chain(token, folder_names, root_name, parent_folder_id)
+    if not folder_id:
+        return []
+    query = (
+        f"'{_escape(folder_id)}' in parents and trashed = false "
+        f"and name contains '{_escape(prefix)}'"
+    )
+    url = "https://www.googleapis.com/drive/v3/files?" + urllib.parse.urlencode({
+        "q": query,
+        "fields": "files(id,name)",
+        "pageSize": "100",
+        "supportsAllDrives": "true",
+        "includeItemsFromAllDrives": "true",
+    })
+    found = _request(url, token=token, method="GET")
+    texts = []
+    for item in found.get("files") or []:
+        name = str(item.get("name") or "")
+        if not name.startswith(prefix):
+            continue
+        file_id = item.get("id")
+        if not file_id:
+            continue
+        raw = _read_url(
+            "https://www.googleapis.com/drive/v3/files/"
+            f"{urllib.parse.quote(file_id)}?alt=media&supportsAllDrives=true",
+            token,
+        )
+        texts.append(raw.decode("utf-8", "replace"))
+    return texts
+
+
 def ping(service_account, root_name="ParthMailing_Storage", parent_folder_id=""):
     """Create the storage root so the operator can confirm the service account works."""
     token = _access_token(service_account)
