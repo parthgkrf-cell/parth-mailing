@@ -51,6 +51,9 @@ import xlsx_writer
 GMAIL_DAILY_CAP = 200
 WORKSPACE_DAILY_CAP = 800
 GMAIL_CONSUMER_GAP = 90.0
+WORKSPACE_GAP = 45.0
+ACCOUNT_START_GAP = 8.0
+SPAM_PAUSE = 180.0
 EMAIL_RE = re.compile(r"^[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}$", re.I)
 REPORT_HEADERS = [
     "Receiver email", "Sender email", "First Name", "Last Name", "Company", "Custom1",
@@ -81,6 +84,10 @@ MAILBOX_STATUS_PATH = os.path.join(DATA_DIR, "mailbox_status.json")
 _db_lock = threading.RLock()
 _cfg_cache = {"mtime": None, "data": None}
 _pool_lock = threading.Lock()
+_turn_lock = threading.Lock()
+_next_live_send = 0.0
+_next_account_start = 0.0
+_started_mailboxes = set()
 _pool = {}
 STOP_ENGINE = threading.Event()
 SLEEP_UNTIL = {}
@@ -802,41 +809,55 @@ def save_email_tracking(data):
     return tracking
 
 
-def tag_tracked_url(url, settings):
+def decode_href(url):
     text = str(url or "").strip()
-    if not settings or not settings.get("enabled"):
-        return text
+    for _ in range(3):
+        plain = html.unescape(text)
+        if plain == text:
+            break
+        text = plain
+    return re.sub(r"&(?:amp%3B|%3B)+(?=utm_)", "&", text, flags=re.I)
+
+
+def tag_tracked_url(url, settings):
+    text = decode_href(url)
     try:
         parts = urllib.parse.urlsplit(text)
     except ValueError:
-        return text
+        return str(url or "").strip()
     if parts.scheme not in ("http", "https") or not parts.netloc:
-        return text
-    query = dict(urllib.parse.parse_qsl(parts.query, keep_blank_values=True))
-    for key, value in (
-        ("utm_source", settings.get("source")),
-        ("utm_medium", settings.get("medium") or "email"),
-        ("utm_campaign", settings.get("campaign")),
-        ("utm_term", settings.get("term")),
-        ("utm_content", settings.get("content")),
-    ):
-        if value and key not in query:
-            query[key] = value
-    return urllib.parse.urlunsplit((
-        parts.scheme, parts.netloc, parts.path,
-        urllib.parse.urlencode(query), parts.fragment,
-    ))
+        return str(url or "").strip()
+    pairs = []
+    seen = set()
+    for key, value in urllib.parse.parse_qsl(parts.query, keep_blank_values=True):
+        name = html.unescape(urllib.parse.unquote(key))
+        name = re.sub(r"^(?:amp;)+", "", name, flags=re.I).lstrip(";")
+        if not name or name in seen:
+            continue
+        seen.add(name)
+        pairs.append((name, value))
+    if settings and settings.get("enabled"):
+        for key, value in (
+            ("utm_source", settings.get("source")),
+            ("utm_medium", settings.get("medium") or "email"),
+            ("utm_campaign", settings.get("campaign")),
+            ("utm_term", settings.get("term")),
+            ("utm_content", settings.get("content")),
+        ):
+            if value and key not in seen:
+                pairs.append((key, value))
+                seen.add(key)
+    query = urllib.parse.urlencode(pairs, quote_via=urllib.parse.quote)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, query, parts.fragment))
 
 
 def apply_email_tracking(html_body):
     settings = email_tracking_settings()
-    if not settings.get("enabled"):
-        return html_body
 
     def replacer(match):
         quote = match.group(1)
         url = tag_tracked_url(match.group(2), settings)
-        return f"href={quote}{url}{quote}"
+        return f"href={quote}{html.escape(url, quote=False)}{quote}"
 
     return re.sub(r'(?i)href=(["\'])(https?://[^"\']+)\1', replacer, str(html_body or ""))
 
@@ -887,14 +908,17 @@ def issue_otp(email, purpose):
         else:
             asked = False
             display = ""
-    if asked:
-        notify_admin_mailbox_request(email, display, "email accounts")
     try:
         send_otp_email(email, code, purpose)
     except Exception:
         with db() as conn:
             conn.execute("DELETE FROM otps WHERE email=?", (email,))
         raise
+    if asked:
+        try:
+            notify_admin_mailbox_request(email, display, "email accounts")
+        except Exception:
+            log(f"Mailbox request from {email} was saved, but the admin notice was not emailed.")
     return ttl
 
 
@@ -1365,10 +1389,10 @@ def build_aligned_from(display_name, mailbox):
 def default_pace():
     raw = load_config().get("pace") or {}
     return {
-        "delay_min_seconds": float(raw.get("delay_min_seconds") if raw.get("delay_min_seconds") is not None else 4),
-        "delay_max_seconds": float(raw.get("delay_max_seconds") if raw.get("delay_max_seconds") is not None else 12),
-        "batch_size": int(raw.get("batch_size") or 20),
-        "batch_pause_minutes": float(raw.get("batch_pause_minutes") if raw.get("batch_pause_minutes") is not None else 2),
+        "delay_min_seconds": float(raw.get("delay_min_seconds") if raw.get("delay_min_seconds") is not None else 45),
+        "delay_max_seconds": float(raw.get("delay_max_seconds") if raw.get("delay_max_seconds") is not None else 90),
+        "batch_size": int(raw.get("batch_size") or 10),
+        "batch_pause_minutes": float(raw.get("batch_pause_minutes") if raw.get("batch_pause_minutes") is not None else 5),
     }
 
 
@@ -1722,15 +1746,26 @@ def smtp_attempts(sender):
     return plan
 
 
+def smtp_login(smtp, user, password):
+    """Sign in with AUTH PLAIN so a refused app password stays a 535, not a dropped connection."""
+    smtp.user = user
+    smtp.password = password
+    smtp.ehlo_or_helo_if_needed()
+    code, resp = smtp.auth("PLAIN", smtp.auth_plain, initial_response_ok=True)
+    if code not in (235, 503):
+        raise smtplib.SMTPAuthenticationError(code, resp)
+    return code, resp
+
+
 def friendly_smtp_error(exc):
-    text = str(exc)
+    text = exception_text(exc)
     lowered = text.lower()
     if isinstance(exc, smtplib.SMTPAuthenticationError) or any(
-        token in text for token in ("535", "534", "Username and Password not accepted", "Application-specific password")
+        token in text for token in ("535", "534", "Username and Password not accepted", "Application-specific password", "BadCredentials")
     ):
-        return "Gmail refused this app password. Create a new 16-character app password in the Google account and save it again."
+        return "Gmail refused the app password for this mailbox only. Create a new 16-character app password in that Google account and save it on this mailbox. Other mailboxes are not affected."
     if isinstance(exc, (smtplib.SMTPServerDisconnected, ConnectionResetError, ConnectionAbortedError, TimeoutError, socket.timeout)) or "unexpectedly closed" in lowered or "timed out" in lowered:
-        return "Gmail closed the connection. Create a new 16-character app password and save it again. If it still fails, Google is blocking SMTP for this mailbox."
+        return "Gmail closed the connection before the message was accepted. This mailbox will be tried again. The app password was not rejected."
     if "getaddrinfo" in lowered or "name or service not known" in lowered or "could not find the mail server" in lowered:
         return "The computer could not find the mail server. Check the internet connection. Sending will try this address again."
     return text[:400]
@@ -1769,8 +1804,11 @@ def connect_smtp(sender, timeout=30):
                 if mode == "tls":
                     smtp.starttls(context=context)
                     smtp.ehlo()
-            smtp.login(sender["user"], sender["password"])
+            smtp_login(smtp, sender["user"], sender["password"])
             return smtp
+        except smtplib.SMTPAuthenticationError:
+            safe_quit(smtp)
+            raise
         except Exception as exc:
             last = exc
             safe_quit(smtp)
@@ -1829,36 +1867,149 @@ def classify_smtp_error(exc):
             else:
                 detail.append(f"{address}: {payload}")
         text = "; ".join(str(item) for item in detail) or str(exc)
+        explained = explain_recipient_error(text)
+        if explained:
+            return explained
         if code.startswith("5") or any(token in text for token in ("550", "551", "552", "553", "554")):
             return "BOUNCED", code or "550", text[:800]
         return "FAILED", code or "450", text[:800]
     if isinstance(exc, smtplib.SMTPResponseException):
         code = str(exc.smtp_code)
         text = str(exc.smtp_error or exc)
+        explained = explain_recipient_error(text)
+        if explained:
+            return explained
         if code in ("550", "551", "552", "553", "554"):
             return "BOUNCED", code, text[:800]
         return "FAILED", code, text[:800]
     text = friendly_smtp_error(exc)
+    explained = explain_recipient_error(text)
+    if explained:
+        return explained
     if any(token in text for token in ("550", "551", "553", "554")):
         return "BOUNCED", "550", text[:800]
     return "FAILED", "", text[:800]
+
+
+_DOMAIN_LOOKUP = {}
+_DOMAIN_BLOCKS = {}
+_TIMEOUT_RETRY = {}
+PUBLIC_INBOX_DOMAINS = frozenset({
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
+    "yahoo.com", "icloud.com", "aol.com", "proton.me", "protonmail.com",
+})
+
+
+def recipient_domain(email):
+    address = normalize_email(email)
+    if "@" not in address:
+        return ""
+    return address.split("@", 1)[1]
+
+
+def explain_recipient_error(text):
+    """Turn a recipient-server rejection into a short reason. The sending account stays as it is."""
+    lowered = str(text or "").lower()
+    if not lowered:
+        return None
+    if any(token in lowered for token in (
+        "out of storage", "inbox is full", "inbox full", "mailbox full", "over quota",
+        "4.2.2", "too much mail",
+    )):
+        return "BOUNCED", "FULL", "The recipient's inbox is full, so this address was not sent again. The sending account was not changed."
+    if "domain" in lowered and any(token in lowered for token in (
+        "couldn't be found", "could not be found", "nxdomain", "domain name not found",
+    )):
+        return "BOUNCED", "MISSING", "This domain does not exist, so the address cannot receive mail. The sending account was not changed."
+    if any(token in lowered for token in (
+        "address not found", "does not exist", "user unknown", "no such user", "mailbox unavailable",
+        "inactive", "5.1.1", "5.2.1", "couldn't be found", "could not be found",
+    )):
+        return "BOUNCED", "MISSING", "This address does not exist or is no longer active. The sending account was not changed."
+    if any(token in lowered for token in (
+        ":blocked", "message blocked", "access denied", "5.4.1",
+        "not allowed to send any mail in this domain",
+    )):
+        return "BOUNCED", "BLOCKED", "The recipient's server blocked this message. The sending account was not changed."
+    if "detected as spam" in lowered or "spam message rejected" in lowered or (
+        "spam" in lowered and any(token in lowered for token in ("554", "5.7.0", "5.7.1"))
+    ):
+        return (
+            "BOUNCED",
+            "SPAM",
+            "The recipient server rejected this message as spam. The desk will wait 3 minutes before the next message. The sending account was not changed.",
+        )
+    if any(token in lowered for token in (
+        "time-out", "timed out", "timeout", "unable to complete the message transaction",
+        "did not accept our requests to connect", "connection quality",
+    )):
+        return "FAILED", "TIMEOUT", "The recipient's server did not answer in time."
+    if "message rejected" in lowered or "69585" in lowered:
+        return "BOUNCED", "REJECTED", "The recipient's server rejected this message. The sending account was not changed."
+    return None
+
+
+def domain_is_missing(domain):
+    domain = str(domain or "").strip().lower().rstrip(".")
+    if not domain or "." not in domain:
+        return False
+    if domain in _DOMAIN_LOOKUP:
+        return _DOMAIN_LOOKUP[domain] == "missing"
+    try:
+        socket.getaddrinfo(domain, None)
+    except socket.gaierror as exc:
+        text = str(exc).lower()
+        missing = exc.errno in (getattr(socket, "EAI_NONAME", 8), 11001, -2) or any(
+            token in text for token in ("not known", "no such host", "nxdomain")
+        )
+        _DOMAIN_LOOKUP[domain] = "missing" if missing else "unknown"
+        return missing
+    except Exception:
+        _DOMAIN_LOOKUP[domain] = "unknown"
+        return False
+    _DOMAIN_LOOKUP[domain] = "ok"
+    return False
+
+
+def note_domain_rows(campaign, domain, reason):
+    """Stop the rest of one recipient domain. Sending accounts are left unchanged."""
+    domain = str(domain or "").strip().lower().rstrip(".")
+    if not campaign or not campaign.get("id") or not domain or domain in PUBLIC_INBOX_DOMAINS:
+        return 0
+    safe = domain.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+    with db() as conn:
+        cur = conn.execute(
+            """
+            UPDATE recipients
+            SET status='SKIPPED', error=?, smtp_code='DOMAIN'
+            WHERE campaign_id=? AND status='QUEUED' AND lower(email) LIKE ? ESCAPE '\\'
+            """,
+            (str(reason or "")[:500], campaign["id"], f"%@{safe}"),
+        )
+        count = cur.rowcount
+        if count:
+            recompute_counts(conn, campaign["id"])
+            add_audit(conn, "relay", "domain_skipped", f"{campaign['id']} {domain} {count}")
+    if count:
+        write_report(campaign["id"], upload=False)
+        log(f"{count} remaining addresses on {domain} were not sent. Sending accounts were not changed.")
+    return count
 
 
 def account_error_is_fatal(message):
     """True when this mailbox cannot keep sending. One bad recipient is not fatal."""
     lowered = str(message or "").lower()
     needles = (
+        "refused the app password",
+        "refused this app password",
         "authentication",
-        "app password",
         "invalid credentials",
         "username and password not accepted",
+        "badcredentials",
         "password missing",
         "smtp host is missing",
         "535",
         "534",
-        "closed the connection",
-        "blocking smtp",
-        "connection refused",
     )
     return any(needle in lowered for needle in needles)
 
@@ -2470,15 +2621,27 @@ def row_copy(fields, keys, fallback):
 
 
 def match_row_sender(pool, item, fields):
+    """Use the Excel account when it is saved on this desk, even if it was not pre-assigned."""
     wanted = row_mailbox(item, fields)
-    if wanted:
-        for sender in pool:
-            if wanted in (
-                normalize_email(sender.get("email")),
-                normalize_email(sender.get("user")),
-                str(sender.get("id") or "").lower(),
-            ):
-                return sender
+    if not wanted:
+        return None
+    sources = []
+    seen = set()
+    for sender in list(pool or []) + configured_senders():
+        if not sender:
+            continue
+        key = sender.get("id") or normalize_email(sender.get("email") or sender.get("user"))
+        if key in seen:
+            continue
+        seen.add(key)
+        sources.append(sender)
+    for sender in sources:
+        if wanted in (
+            normalize_email(sender.get("email")),
+            normalize_email(sender.get("user")),
+            str(sender.get("id") or "").lower(),
+        ):
+            return sender
     return None
 
 
@@ -2707,6 +2870,29 @@ def rows_from_sheet(matrix):
                 best_score = score
                 best_index = column
         indexes["email"] = best_index
+    sample = matrix[1:31]
+    chosen = indexes["email"]
+    chosen_hits = 0
+    if chosen >= 0:
+        for row in sample:
+            if chosen < len(row) and EMAIL_RE.match(normalize_email(row[chosen])):
+                chosen_hits += 1
+    if chosen < 0 or chosen_hits == 0:
+        best_index = -1
+        best_score = 0
+        width = max((len(row) for row in sample), default=len(headers))
+        for column in range(width):
+            label = re.sub(r"[^a-z0-9]+", "", str(headers[column] if column < len(headers) else "").lower())
+            if label and label in compact_headers["sender"]:
+                continue
+            score = sum(1 for row in sample if column < len(row) and EMAIL_RE.match(normalize_email(row[column])))
+            if score > best_score:
+                best_score = score
+                best_index = column
+        if best_index >= 0:
+            if indexes["first"] == best_index:
+                indexes["first"] = chosen if chosen >= 0 else -1
+            indexes["email"] = best_index
     rows = []
     invalid = 0
     columns = []
@@ -3363,6 +3549,36 @@ def sleep_key(campaign_id, sender_id):
     return f"{campaign_id}:{sender_id or 'default'}"
 
 
+def wait_live_turn(sender):
+    """Each mailbox sends on its own thread. Only its first message is spaced apart from the others."""
+    global _next_account_start
+    if not live_delivery(sender):
+        return
+    mailbox = normalize_email((sender or {}).get("user") or (sender or {}).get("email"))
+    with _turn_lock:
+        now = time.time()
+        if mailbox not in _started_mailboxes:
+            slot = max(now, _next_account_start, _next_live_send)
+            _next_account_start = slot + ACCOUNT_START_GAP
+            _started_mailboxes.add(mailbox)
+        else:
+            slot = max(now, _next_live_send)
+        delay = slot - now
+    if delay > 0.05:
+        time.sleep(delay)
+
+
+def spam_rejected(message):
+    lowered = str(message or "").lower()
+    return "detected as spam" in lowered or ("5.7.1" in lowered and "spam" in lowered)
+
+
+def pause_after_spam():
+    global _next_live_send
+    with _turn_lock:
+        _next_live_send = max(_next_live_send, time.time() + SPAM_PAUSE)
+
+
 def after_send_delay(campaign, sender):
     key = sleep_key(campaign["id"], (sender or {}).get("id"))
     if campaign_action(campaign) == "draft":
@@ -3379,10 +3595,11 @@ def after_send_delay(campaign, sender):
         low = pace["delay_min_seconds"]
         high = pace["delay_max_seconds"]
         delay = random.uniform(low, high) if high > low else low
-    if is_consumer_gmail(sender):
-        delay = max(delay, GMAIL_CONSUMER_GAP)
-    else:
-        delay = max(delay, 4.0)
+    if live_delivery(sender):
+        if is_consumer_gmail(sender):
+            delay = max(delay, GMAIL_CONSUMER_GAP)
+        else:
+            delay = max(delay, WORKSPACE_GAP)
     SLEEP_UNTIL[key] = time.time() + delay
 
 
@@ -3526,7 +3743,7 @@ def finish_if_drained(campaign_id):
         if not camp or camp["status"] != "running":
             return False
         left = conn.execute(
-            "SELECT COUNT(*) AS n FROM recipients WHERE campaign_id=? AND status='QUEUED'",
+            "SELECT COUNT(*) AS n FROM recipients WHERE campaign_id=? AND status IN ('QUEUED', 'SENDING')",
             (campaign_id,),
         ).fetchone()["n"]
         if left:
@@ -3634,10 +3851,31 @@ def process_account_send(campaign_id, sender_id):
             }, sender)
             finish_if_drained(camp["id"])
             return
-    try:
-        outcome = deliver(camp, recipient, sender)
-    except Exception as exc:
-        outcome = {"status": "FAILED", "code": "", "error": str(exc)[:800], "simulated": False}
+    domain = recipient_domain(recipient.get("email"))
+    preset = None
+    if domain and domain_is_missing(domain):
+        preset = {
+            "status": "BOUNCED",
+            "code": "MISSING",
+            "error": f"{domain} does not exist, so this address cannot receive mail. The sending account was not changed.",
+            "simulated": False,
+        }
+    elif domain and _DOMAIN_BLOCKS.get((camp["id"], domain), 0) >= 3:
+        preset = {
+            "status": "SKIPPED",
+            "code": "DOMAIN",
+            "error": f"{domain} is blocking mail. This address was not sent. The sending account was not changed.",
+            "simulated": False,
+        }
+    if preset:
+        outcome = preset
+    else:
+        if live_delivery(sender) and campaign_action(camp) != "draft":
+            wait_live_turn(sender)
+        try:
+            outcome = deliver(camp, recipient, sender)
+        except Exception as exc:
+            outcome = {"status": "FAILED", "code": "", "error": str(exc)[:800], "simulated": False}
     if network_lookup_failed(outcome.get("error") or ""):
         tries = DNS_RETRY.get(recipient["id"], 0) + 1
         DNS_RETRY[recipient["id"]] = tries
@@ -3648,8 +3886,51 @@ def process_account_send(campaign_id, sender_id):
         else:
             outcome["status"] = "FAILED"
             outcome["error"] = "The computer could not find the mail server. Check the internet connection, then start sending again."
+    elif outcome.get("code") == "TIMEOUT":
+        tries = _TIMEOUT_RETRY.get(recipient["id"], 0) + 1
+        _TIMEOUT_RETRY[recipient["id"]] = tries
+        if tries < 3:
+            outcome = {"status": "QUEUED", "code": "", "error": "", "simulated": False}
+            SLEEP_UNTIL[key] = time.time() + 60
+            log(f"The recipient server did not answer for {recipient['email']}; it will be tried again")
+        else:
+            outcome["status"] = "BOUNCED"
+            outcome["error"] = "The recipient's server did not answer. This address was stopped. The sending account was not changed."
+    if outcome.get("code") == "SPAM" and "will wait" not in str(outcome.get("error") or ""):
+        outcome["error"] = (
+            "The recipient server rejected this message as spam. "
+            f"The desk will wait {int(SPAM_PAUSE // 60)} minutes before the next message. "
+            "The sending account was not changed."
+        )
+    if sender.get("user") and outcome.get("error") and sender["user"] not in str(outcome.get("error")):
+        outcome["error"] = f"{sender['user']}: {outcome['error']}"
     save_outcome(camp, recipient, outcome, sender)
+    if domain and outcome.get("code") == "MISSING" and domain_is_missing(domain):
+        note_domain_rows(
+            camp,
+            domain,
+            f"{domain} does not exist, so the remaining addresses on that domain were not sent. The sending accounts were not changed.",
+        )
+    if domain and outcome.get("code") == "BLOCKED" and domain not in PUBLIC_INBOX_DOMAINS:
+        seen = _DOMAIN_BLOCKS.get((camp["id"], domain), 0) + 1
+        _DOMAIN_BLOCKS[(camp["id"], domain)] = seen
+        if seen >= 3:
+            note_domain_rows(
+                camp,
+                domain,
+                f"{domain} is blocking mail. The remaining addresses on that domain were not sent. The sending accounts were not changed.",
+            )
+    if outcome.get("status") == "FAILED" and account_error_is_fatal(outcome.get("error")):
+        note_mailbox_rows(camp, sender["id"], outcome.get("error") or "This mailbox cannot send.")
     after_send_delay(camp, sender)
+    if outcome.get("code") == "SPAM" or spam_rejected(outcome.get("error")):
+        pause_after_spam()
+        SLEEP_UNTIL[key] = max(SLEEP_UNTIL.get(key, 0), time.time() + SPAM_PAUSE)
+        set_hold(
+            camp["id"],
+            "A recipient server rejected a message as spam. The desk will wait 3 minutes before the next one.",
+            SPAM_PAUSE,
+        )
     label = "SIMULATED" if outcome.get("simulated") else outcome["status"]
     verb = "draft" if campaign_action(camp) == "draft" else "send"
     log(f"{label} [{verb}] {sender['user']} -> {recipient['email']} {outcome.get('code') or ''} {(outcome.get('error') or '')[:160]}")
@@ -3856,7 +4137,7 @@ def send_otp_email(target, code, purpose="login"):
             if hidden and hidden in raw:
                 raw = raw.replace(hidden, "[redacted]")
         log(f"Sign-in email to {target} failed: {type(first).__name__}: {raw[:240]}")
-        raise ApiError("The 6-digit sign-in code could not be emailed. Wait a moment and try again.", 502) from None
+        raise ApiError(detail or "The 6-digit sign-in code could not be emailed. Wait a moment and try again.", 502) from None
     write_mailbox_status(True, f"Sign-in codes send from {OTP_FROM}.")
     log(f"Sign-in code emailed to {target} from {OTP_FROM}.")
 
@@ -4208,7 +4489,8 @@ class Handler(BaseHTTPRequestHandler):
                 "gmail_daily_cap": gmail_daily_cap(),
                 "workspace_daily_cap": workspace_daily_cap(),
                 "gmail_gap_seconds": int(GMAIL_CONSUMER_GAP),
-                "workspace_gap_seconds": 4,
+                "workspace_gap_seconds": int(WORKSPACE_GAP),
+                "desk_gap_seconds": int(ACCOUNT_START_GAP),
                 "active_campaigns": active,
             })
             return
@@ -4545,7 +4827,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def register_account(self, data):
         email = normalize_email(data.get("email"))
-        name = require_display_name(data.get("display_name") or data.get("name"))
+        raw_name = " ".join(str(data.get("display_name") or data.get("name") or "").split())
+        name = require_display_name(raw_name) if len(raw_name) >= 2 else fallback_display_name(email)
         salt, digest = hash_password(data.get("password"))
         if not allowed_email(email):
             raise ApiError(f"Use a work address ending with {domain_suffix()}.")
@@ -4609,16 +4892,15 @@ class Handler(BaseHTTPRequestHandler):
             })
             return
         if len(password) < 6:
-            with db() as conn:
-                ensure_user(conn, email)
-                conn.execute(
-                    "UPDATE users SET display_name=? WHERE email=? AND TRIM(COALESCE(display_name, ''))=''",
-                    (fallback_display_name(email), email),
-                )
-                asked = record_access_request(conn, email)
-            if asked:
-                notify_admin_mailbox_request(email, fallback_display_name(email), "email accounts")
-            raise ApiError("Enter your name and a password of at least 6 characters. The request for email accounts is in Admin, and a sign-in code is emailed after the password is set.")
+            ttl = issue_otp(email, "login")
+            self.send_json(200, {
+                "ok": True,
+                "needs_otp": True,
+                "purpose": "login",
+                "expires_in": ttl,
+                "delivery": "email",
+            })
+            return
         if not name:
             name = fallback_display_name(email)
         salt, digest = hash_password(password)
@@ -4845,11 +5127,15 @@ class Handler(BaseHTTPRequestHandler):
             for sender in approved_senders_for(conn, user):
                 allowed.add(normalize_email(sender.get("email")))
                 allowed.add(normalize_email(sender.get("user")))
+        known = set()
+        for sender in configured_senders():
+            known.add(normalize_email(sender.get("email")))
+            known.add(normalize_email(sender.get("user")))
         kept = []
         blocked = []
         for row in rows:
             mailbox = row_mailbox(row, row.get("fields"))
-            if user["role"] != "ROLE_MASTER" and mailbox and mailbox not in allowed:
+            if user["role"] != "ROLE_MASTER" and mailbox and mailbox not in allowed and mailbox not in known:
                 blocked.append(mailbox)
                 continue
             kept.append(row)
@@ -5048,10 +5334,19 @@ class Handler(BaseHTTPRequestHandler):
             cursor = 0
             if replace:
                 conn.execute("DELETE FROM recipients WHERE campaign_id=?", (campaign_id,))
-            seen = {
-                row["email"]
-                for row in conn.execute("SELECT email FROM recipients WHERE campaign_id=?", (campaign_id,))
-            }
+            seen = set()
+            for row in conn.execute(
+                "SELECT email, fields_json, from_email FROM recipients WHERE campaign_id=?",
+                (campaign_id,),
+            ):
+                try:
+                    stored_fields = json.loads(row["fields_json"] or "{}")
+                except (json.JSONDecodeError, TypeError):
+                    stored_fields = {}
+                if not isinstance(stored_fields, dict):
+                    stored_fields = {}
+                mailbox = row_mailbox({"sender": row["from_email"]}, stored_fields)
+                seen.add(f"{normalize_email(row['email'])}\n{mailbox}")
             existing_count = len(seen)
             prepared = []
             invalid = 0
@@ -5065,12 +5360,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not EMAIL_RE.match(email):
                     invalid += 1
                     continue
-                if email in seen:
+                incoming_fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+                mailbox = row_mailbox(item, incoming_fields)
+                slot = f"{email}\n{mailbox}"
+                if slot in seen:
                     duplicates += 1
                     continue
                 if existing_count + len(prepared) >= 200000:
                     raise ApiError("This campaign exceeds 200,000 recipients.")
-                seen.add(email)
+                seen.add(slot)
                 fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
                 trimmed = {}
                 extra = {
@@ -5095,7 +5393,7 @@ class Handler(BaseHTTPRequestHandler):
                 mailbox = row_mailbox(item, trimmed)
                 if mailbox and not matched and status == "QUEUED":
                     status = "SKIPPED"
-                    error = f"This account cannot use {mailbox}."
+                    error = f"{mailbox} is not a mailbox saved on this desk."
                     code = "ACCESS"
                     assigned = ""
                 elif matched:

@@ -295,8 +295,8 @@ function limitNote() {
   const gmail = Number((state.health && state.health.gmail_daily_cap) || 200);
   const workspace = Number((state.health && state.health.workspace_daily_cap) || 800);
   const gap = Number((state.health && state.health.gmail_gap_seconds) || 90);
-  const workspaceGap = Number((state.health && state.health.workspace_gap_seconds) || 4);
-  return `Gmail waits at least ${gap} seconds and stops at ${gmail.toLocaleString()} in 24 hours. Workspace waits at least ${workspaceGap} seconds and stops at ${workspace.toLocaleString()}.`;
+  const workspaceGap = Number((state.health && state.health.workspace_gap_seconds) || 45);
+  return `Each mailbox sends on its own. Gmail waits ${gap} seconds and stops at ${gmail.toLocaleString()} in 24 hours. Workspace waits ${workspaceGap} seconds and stops at ${workspace.toLocaleString()}. Their first messages start a few seconds apart. A spam rejection pauses the desk for 3 minutes.`;
 }
 
 function mailboxQuotaLine(sender) {
@@ -470,6 +470,10 @@ function rowSendingAccount(row) {
   if (EMAIL_RE.test(normalizeEmail(named))) return normalizeEmail(named);
   const sender = normalizeEmail(row && row.sender);
   return EMAIL_RE.test(sender) ? sender : "";
+}
+
+function recipientKey(row) {
+  return `${normalizeEmail(row && row.email)}\n${rowSendingAccount(row)}`;
 }
 
 function rowSenderName(row) {
@@ -1251,12 +1255,14 @@ function updatePreview() {
 
 function mergedRecipients() {
   const map = new Map();
-  state.recipients.forEach((row) => map.set(row.email, row));
+  state.recipients.forEach((row) => map.set(recipientKey(row), row));
   const extra = document.getElementById("to-input");
   if (extra) {
+    const listed = new Set([...map.values()].map((row) => normalizeEmail(row.email)));
     extra.value.split(/[\s,;]+/).forEach((part) => {
       const email = normalizeEmail(part);
-      if (EMAIL_RE.test(email) && !map.has(email)) {
+      if (EMAIL_RE.test(email) && !listed.has(email)) {
+        listed.add(email);
         map.set(email, { email, first_name: "", last_name: "", company: "", custom1: "", fields: {} });
       }
     });
@@ -1750,7 +1756,13 @@ async function importFiles(fileList, options) {
   paintChrome();
   if (state.view === "recipients") renderView();
   rememberSheetAddresses();
-  toast(`${state.recipients.length.toLocaleString()} recipients ready`);
+  const readyCount = state.recipients.length;
+  const invalidCount = state.stats.invalid || 0;
+  if (!readyCount) {
+    toast(invalidCount
+      ? `0 recipients ready. ${invalidCount.toLocaleString()} rows did not contain an email address.`
+      : "0 recipients ready. That file had no recipient rows.", "warn");
+  } else toast(`${readyCount.toLocaleString()} recipients ready`);
 }
 
 function runWorker(file) {
@@ -1789,7 +1801,7 @@ function addRows(rows, replaceExisting) {
     if (!EMAIL_RE.test(email)) return;
     state.seen.add(email);
     const next = Object.assign({}, row, { email });
-    const existing = state.recipients.findIndex((item) => item.email === email);
+    const existing = state.recipients.findIndex((item) => recipientKey(item) === recipientKey(next));
     if (existing >= 0) {
       if (replaceExisting) state.recipients[existing] = next;
       state.stats.duplicates += 1;
@@ -1916,7 +1928,7 @@ async function sendCampaign(action, options) {
   const mailboxLine = mode === "draft"
     ? `IMAP drafts on ${sender && (sender.display_name || sender.email) || "the selected mailbox"}.`
     : (senders.length > 1
-      ? `${senders.length} assigned mailboxes send in parallel. ${limitNote()}`
+      ? `${senders.length} mailboxes send at the same time, each on its own timer. ${limitNote()}`
       : `One mailbox sends one by one. ${limitNote()}`);
   const sheetAccounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
   const sheetNames = [...new Set(rows.map((row) => rowSenderName(row)).filter(Boolean))];
@@ -2195,12 +2207,38 @@ function readTrackingForm() {
   };
 }
 
+function decodeHref(url) {
+  let text = String(url || "").trim();
+  for (let pass = 0; pass < 3; pass += 1) {
+    const next = text.replace(/&amp;/gi, "&").replace(/&#0*38;/gi, "&");
+    if (next === text) break;
+    text = next;
+  }
+  return text.replace(/&(?:amp%3B|%3B)+(?=utm_)/gi, "&");
+}
+
+function repairTrackedUrl(url) {
+  const text = decodeHref(url);
+  let parsed;
+  try { parsed = new URL(text); } catch (error) { return String(url || ""); }
+  if (!["http:", "https:"].includes(parsed.protocol)) return String(url || "");
+  const query = new URLSearchParams();
+  [...parsed.searchParams.entries()].forEach(([key, value]) => {
+    let name = key.replace(/^(?:amp;)+/i, "").replace(/^;+/, "");
+    try { name = decodeURIComponent(name); } catch (error) { /* keep the key */ }
+    name = name.replace(/^(?:amp;)+/i, "").replace(/^;+/, "");
+    if (name && !query.has(name)) query.set(name, value);
+  });
+  parsed.search = query.toString();
+  return parsed.toString();
+}
+
 function tagTrackedUrl(url, tracking) {
   const settings = tracking || state.tracking || {};
-  if (!settings.enabled) return url;
+  const repaired = repairTrackedUrl(url);
+  if (!settings.enabled) return repaired;
   try {
-    const parsed = new URL(url);
-    if (!["http:", "https:"].includes(parsed.protocol)) return url;
+    const parsed = new URL(repaired);
     const pairs = {
       utm_source: settings.source,
       utm_medium: settings.medium || "email",
@@ -2213,7 +2251,7 @@ function tagTrackedUrl(url, tracking) {
     });
     return parsed.toString();
   } catch (error) {
-    return url;
+    return repaired;
   }
 }
 
@@ -2334,7 +2372,10 @@ function readyGa4Link() {
 function tagHtmlLinks(html, tracking) {
   const settings = tracking || readTrackingForm();
   settings.enabled = true;
-  return String(html || "").replace(/href=(["'])(https?:\/\/.*?)\1/gi, (match, quote, url) => `href=${quote}${tagTrackedUrl(url, settings)}${quote}`);
+  return String(html || "").replace(/href=(["'])(https?:\/\/.*?)\1/gi, (match, quote, url) => {
+    const tagged = tagTrackedUrl(url, settings).replace(/&/g, "&amp;").replace(/"/g, "&quot;");
+    return `href=${quote}${tagged}${quote}`;
+  });
 }
 
 function paintFullPreview() {

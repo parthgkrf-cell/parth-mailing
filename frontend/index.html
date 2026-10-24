@@ -252,10 +252,10 @@
       <details class="composer-options" open>
         <summary>When sending starts</summary>
         <div class="pace-grid">
-          <label>Delay min (s)<input id="delay-min" class="input" type="number" min="4" max="300" step="0.5" value="4"></label>
-          <label>Delay max (s)<input id="delay-max" class="input" type="number" min="4" max="300" step="0.5" value="12"></label>
-          <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="20"></label>
-          <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="2"></label>
+          <label>Delay min (s)<input id="delay-min" class="input" type="number" min="30" max="300" step="0.5" value="45"></label>
+          <label>Delay max (s)<input id="delay-max" class="input" type="number" min="30" max="300" step="0.5" value="90"></label>
+          <label>Batch size<input id="batch-size" class="input" type="number" min="1" max="5000" value="10"></label>
+          <label>Pause (min)<input id="batch-pause" class="input" type="number" min="0" max="180" step="0.5" value="5"></label>
         </div>
         <label class="check-line"><input id="schedule-on" type="checkbox"> Schedule for later</label>
         <div id="schedule-fields" class="schedule-grid hidden">
@@ -263,7 +263,7 @@
           <label>Start time<input id="schedule-time" class="input" type="time"></label>
           <label>Timezone<select id="schedule-zone" class="input" aria-label="Timezone"></select></label>
         </div>
-        <p id="schedule-hint" class="hint hidden">Sending waits until the date and time you choose. A later S_Date and S_Time waits until that time. Gmail then waits at least 90 seconds and stops at 200 in 24 hours. Workspace waits at least 4 seconds and stops at 800. Leave Start-Mailing-Suite.bat open until then.</p>
+        <p id="schedule-hint" class="hint hidden">Sending waits until the date and time you choose. A later S_Date and S_Time waits until that time. Each mailbox sends on its own timer. Gmail waits 90 seconds and Workspace waits 45 seconds. Their first messages start a few seconds apart. A spam rejection pauses the desk for 3 minutes. Leave Start-Mailing-Suite.bat open until then.</p>
       </details>
       <div class="composer-actions">
         <button type="button" class="btn btn-primary" id="send-button" data-action="smtp-send">SMTP Send</button>

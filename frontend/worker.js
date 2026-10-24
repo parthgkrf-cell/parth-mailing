@@ -102,12 +102,14 @@ function createSink() {
   function push(row) {
     stats.scanned += 1;
     const email = cleanEmail(row.email);
+    const mailbox = cleanEmail((row.fields && (row.fields["Sender email"] || row.fields["Account Email"])) || row.sender || "");
+    const slot = EMAIL_RE.test(mailbox) ? `${email}\n${mailbox}` : email;
     if (!EMAIL_RE.test(email)) {
       stats.invalid += 1;
-    } else if (seen.has(email)) {
+    } else if (seen.has(slot)) {
       stats.duplicates += 1;
     } else {
-      seen.add(email);
+      seen.add(slot);
       stats.valid += 1;
       row.email = email;
       Object.keys(row.fields || {}).forEach((key) => columns.add(key));
@@ -176,11 +178,27 @@ function rowFrom(values, mapper, headers, extraFields) {
   };
 }
 
+function emailHits(rows, index) {
+  let score = 0;
+  for (const row of rows) {
+    if (EMAIL_RE.test(cleanEmail(row[index]))) score += 1;
+  }
+  return score;
+}
+
+function repairEmailColumn(headers, sample, mapper) {
+  if (mapper.email >= 0 && emailHits(sample, mapper.email) > 0) return;
+  const detected = detectEmailColumn(sample, Math.max(headers.length, ...sample.map((row) => row.length), 0), headers);
+  if (detected < 0) return;
+  if (mapper.first === detected) mapper.first = mapper.email >= 0 ? mapper.email : -1;
+  mapper.email = detected;
+}
+
 function consumeMatrix(matrix, sheetName, sheetCount, sink) {
   if (!matrix.length) return;
   const headers = (matrix[0] || []).map((value) => String(value || "").trim());
   const mapper = buildMapper(headers);
-  if (mapper.email < 0) mapper.email = detectEmailColumn(matrix.slice(1, 30), headers.length, headers);
+  repairEmailColumn(headers, matrix.slice(1, 31), mapper);
   const extra = sheetCount > 1 ? { Sheet: sheetName } : null;
   for (let index = 1; index < matrix.length; index += 1) {
     const values = matrix[index] || [];
@@ -192,7 +210,7 @@ function consumeMatrix(matrix, sheetName, sheetCount, sink) {
 async function parseCsv(file, sink) {
   const reader = file.stream().getReader();
   const decoder = new TextDecoder("utf-8");
-  const ctx = { row: [], cur: "", quotes: false, headers: null, mapper: null, line: 0, sample: [] };
+  const ctx = { row: [], cur: "", quotes: false, headers: null, mapper: null, line: 0, sample: [], repaired: false };
   const finishRow = () => {
     ctx.row.push(ctx.cur);
     ctx.cur = "";
@@ -204,13 +222,9 @@ async function parseCsv(file, sink) {
       ctx.mapper = buildMapper(ctx.headers);
       return;
     }
-    if (ctx.mapper.email < 0) {
+    if (!ctx.repaired) {
       ctx.sample.push(values);
-      if (ctx.sample.length >= 25) {
-        ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length, ctx.headers);
-        ctx.sample.forEach((sample) => sink.push(rowFrom(sample, ctx.mapper, ctx.headers)));
-        ctx.sample = [];
-      }
+      if (ctx.sample.length >= 25) repairCsvSample(ctx, sink);
       return;
     }
     sink.push(rowFrom(values, ctx.mapper, ctx.headers));
@@ -245,11 +259,15 @@ async function parseCsv(file, sink) {
     if (step.done) break;
   }
   if (ctx.cur || ctx.row.length) finishRow();
-  if (ctx.mapper && ctx.mapper.email < 0 && ctx.sample.length) {
-    ctx.mapper.email = detectEmailColumn(ctx.sample, ctx.headers.length);
-    ctx.sample.forEach((values) => sink.push(rowFrom(values, ctx.mapper, ctx.headers)));
-    ctx.sample = [];
-  }
+  repairCsvSample(ctx, sink);
+}
+
+function repairCsvSample(ctx, sink) {
+  if (ctx.repaired || !ctx.mapper) return;
+  repairEmailColumn(ctx.headers, ctx.sample, ctx.mapper);
+  ctx.sample.forEach((values) => sink.push(rowFrom(values, ctx.mapper, ctx.headers)));
+  ctx.sample = [];
+  ctx.repaired = true;
 }
 
 async function parseWorkbook(file, sink) {
