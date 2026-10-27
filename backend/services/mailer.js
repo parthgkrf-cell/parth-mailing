@@ -136,6 +136,7 @@ async function sendSingleEmail({ account, recipient, subject, bodyHtml, bodyText
   const headers = { 'X-Mailer': 'Parth-Mailing-Engine/1.0' };
   if (enforceUnsub && supportEmail) {
     headers['List-Unsubscribe'] = `<mailto:${supportEmail}?subject=unsubscribe>`;
+    headers['List-Unsubscribe-Post'] = 'List-Unsubscribe=One-Click';
   }
 
   const transporter = getTransporter(account);

@@ -122,6 +122,16 @@ async function processDueSchedules() {
           console.warn(`[Scheduler] Job #${job.id} paused so the rest of the list is not failed one by one.`);
           continue;
         }
+        const isTransient = /closed the connection|ECONNRESET|ETIMEDOUT|ESOCKET|unexpectedly closed|timed out/i.test(msg);
+        if (isTransient) {
+          job._retryMap = job._retryMap || {};
+          job._retryMap[next.email] = (job._retryMap[next.email] || 0) + 1;
+          if (job._retryMap[next.email] <= 3) {
+            console.warn(`[Scheduler] Transient connection drop for ${next.email}. Pausing 15s to retry (attempt ${job._retryMap[next.email]}/3).`);
+            await new Promise((resolve) => setTimeout(resolve, 15000));
+            continue;
+          }
+        }
         const newFailed = (job.failed_count || 0) + 1;
         const isDone = ((job.sent_count || 0) + newFailed) >= rows.length;
         await run(

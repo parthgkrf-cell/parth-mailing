@@ -1384,6 +1384,9 @@ def sanitize_display_name(raw, mailbox):
 def build_aligned_from(display_name, mailbox):
     name = sanitize_display_name(display_name, mailbox)
     if name and mailbox:
+        if any(ord(char) > 127 for char in name):
+            encoded = Header(name, "utf-8").encode()
+            return f"{encoded} <{mailbox}>"
         safe = name.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{safe}" <{mailbox}>'
     return mailbox
@@ -1668,6 +1671,16 @@ def queue_drive_upload(local_path, segments, campaign_id, column):
 _DNS_CACHE = {}
 
 
+def clear_dns_cache(host=None):
+    if host:
+        prefix = str(host).strip().lower()
+        for k in list(_DNS_CACHE.keys()):
+            if k[0] == prefix:
+                _DNS_CACHE.pop(k, None)
+    else:
+        _DNS_CACHE.clear()
+
+
 def ipv4_socket(host, port, timeout):
     host = str(host or "").strip()
     if not host:
@@ -1676,9 +1689,15 @@ def ipv4_socket(host, port, timeout):
     cache_key = (host.lower(), int(port))
     cached = _DNS_CACHE.get(cache_key)
     if cached and cached[0] > time.time():
-        for family_id, socktype, proto, address in cached[1]:
+        addresses = list(cached[1])
+        random.shuffle(addresses)
+        for family_id, socktype, proto, address in addresses:
             sock = socket.socket(family_id, socktype, proto)
             try:
+                try:
+                    sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                except OSError:
+                    pass
                 sock.settimeout(timeout)
                 sock.connect(address)
                 return sock
@@ -1690,23 +1709,30 @@ def ipv4_socket(host, port, timeout):
         for family in (socket.AF_INET, socket.AF_INET6):
             try:
                 infos = socket.getaddrinfo(host, port, family, socket.SOCK_STREAM)
+                for family_id, socktype, proto, _canon, address in infos:
+                    entry = (family_id, socktype, proto, address)
+                    if entry not in found:
+                        found.append(entry)
             except socket.gaierror as exc:
                 last = exc
                 continue
-            for family_id, socktype, proto, _canon, address in infos:
-                found.append((family_id, socktype, proto, address))
+        if found:
+            _DNS_CACHE[cache_key] = (time.time() + 300, list(found))
+            addresses = list(found)
+            random.shuffle(addresses)
+            for family_id, socktype, proto, address in addresses:
                 sock = socket.socket(family_id, socktype, proto)
                 try:
+                    try:
+                        sock.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+                    except OSError:
+                        pass
                     sock.settimeout(timeout)
                     sock.connect(address)
-                    if found:
-                        _DNS_CACHE[cache_key] = (time.time() + 600, found)
                     return sock
                 except OSError as exc:
                     last = exc
                     sock.close()
-        if found:
-            break
         time.sleep(1.5)
     if isinstance(last, socket.gaierror):
         raise OSError("The computer could not find the mail server smtp.gmail.com. Check the internet connection. This address will be tried again.")
@@ -1793,28 +1819,55 @@ def friendly_imap_error(exc):
     return text[:400]
 
 
+def is_smtp_alive(smtp):
+    """Test if a pooled SMTP connection is still open and accepted by the server."""
+    if not smtp or getattr(smtp, "sock", None) is None:
+        return False
+    try:
+        status = smtp.noop()[0]
+        return status == 250
+    except Exception:
+        return False
+
+
+def purge_sender_pool(sender):
+    if not sender:
+        return
+    host = str(sender.get("host") or "").strip()
+    port = int(sender.get("port") or (465 if (sender.get("secure") or "ssl") == "ssl" else 587))
+    user = str(sender.get("user") or sender.get("email") or "").strip().lower()
+    key = (host, port, user)
+    with _pool_lock:
+        current = _pool.pop(key, None)
+        safe_quit(current)
+
+
 def connect_smtp(sender, timeout=30):
     context = ssl.create_default_context()
     last = None
-    for mode, host, port in smtp_attempts(sender):
-        smtp = None
-        try:
-            if mode == "ssl":
-                smtp = IPv4SMTP_SSL(host, port, timeout=timeout, context=context)
-            else:
-                smtp = IPv4SMTP(host, port, timeout=timeout)
-                smtp.ehlo()
-                if mode == "tls":
-                    smtp.starttls(context=context)
+    for round_num in range(2):
+        for mode, host, port in smtp_attempts(sender):
+            smtp = None
+            try:
+                if mode == "ssl":
+                    smtp = IPv4SMTP_SSL(host, port, timeout=timeout, context=context)
+                else:
+                    smtp = IPv4SMTP(host, port, timeout=timeout)
                     smtp.ehlo()
-            smtp_login(smtp, sender["user"], sender["password"])
-            return smtp
-        except smtplib.SMTPAuthenticationError:
-            safe_quit(smtp)
-            raise
-        except Exception as exc:
-            last = exc
-            safe_quit(smtp)
+                    if mode == "tls":
+                        smtp.starttls(context=context)
+                        smtp.ehlo()
+                smtp_login(smtp, sender["user"], sender["password"])
+                return smtp
+            except smtplib.SMTPAuthenticationError:
+                safe_quit(smtp)
+                raise
+            except Exception as exc:
+                last = exc
+                safe_quit(smtp)
+        if round_num == 0:
+            clear_dns_cache(sender.get("host"))
+            time.sleep(1.0)
     if last is None:
         raise OSError("SMTP host is missing.")
     raise last
@@ -1835,12 +1888,17 @@ def safe_quit(smtp):
 def send_with_pool(sender, message, recipients):
     key = (sender["host"], int(sender["port"]), sender["user"].lower())
     last_error = None
-    for attempt in (1, 2):
+    for attempt in range(1, 4):
         smtp = None
         discard = False
         try:
             with _pool_lock:
-                smtp = None if attempt == 2 else _pool.get(key)
+                if attempt == 1:
+                    smtp = _pool.get(key)
+                    if smtp is not None and not is_smtp_alive(smtp):
+                        safe_quit(smtp)
+                        _pool.pop(key, None)
+                        smtp = None
                 if smtp is None:
                     smtp = connect_smtp(sender)
                     _pool[key] = smtp
@@ -1848,14 +1906,20 @@ def send_with_pool(sender, message, recipients):
             if refused:
                 raise smtplib.SMTPRecipientsRefused(refused)
             return "250", "OK"
+        except (smtplib.SMTPAuthenticationError, smtplib.SMTPRecipientsRefused):
+            with _pool_lock:
+                current = _pool.pop(key, None)
+                safe_quit(current if current is not None else smtp)
+            raise
         except Exception as exc:
             last_error = exc
             discard = True
-        finally:
-            if discard:
-                with _pool_lock:
-                    current = _pool.pop(key, None)
-                    safe_quit(current if current is not None else smtp)
+            with _pool_lock:
+                current = _pool.pop(key, None)
+                safe_quit(current if current is not None else smtp)
+            clear_dns_cache(sender.get("host"))
+            if attempt < 3:
+                time.sleep(1.5 * attempt)
     raise last_error
 
 
@@ -1891,12 +1955,15 @@ def classify_smtp_error(exc):
         return explained
     if any(token in text for token in ("550", "551", "553", "554")):
         return "BOUNCED", "550", text[:800]
+    if isinstance(exc, (smtplib.SMTPServerDisconnected, ConnectionResetError, ConnectionAbortedError, TimeoutError, socket.timeout)) or "closed the connection" in text:
+        return "FAILED", "DISCONNECTED", text[:800]
     return "FAILED", "", text[:800]
 
 
 _DOMAIN_LOOKUP = {}
 _DOMAIN_BLOCKS = {}
 _TIMEOUT_RETRY = {}
+_DISCONNECT_RETRY = {}
 PUBLIC_INBOX_DOMAINS = frozenset({
     "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com",
     "yahoo.com", "icloud.com", "aol.com", "proton.me", "protonmail.com",
@@ -2020,23 +2087,47 @@ def account_error_is_fatal(message):
 UNSUBSCRIBE_ADDRESS = "conference.ictcs@gmail.com"
 
 
-def unsubscribe_href(recipient_email):
+def unsubscribe_href(recipient_email, sender_mailbox=None):
     who = str(recipient_email or "").strip() or "this address"
+    contact = str(sender_mailbox or UNSUBSCRIBE_ADDRESS).strip()
     body = urllib.parse.quote(f"Please unsubscribe {who}.")
-    return f"mailto:{UNSUBSCRIBE_ADDRESS}?subject=Unsubscribe&body={body}"
+    return f"mailto:{contact}?subject=Unsubscribe&body={body}"
 
 
-def link_unsubscribe(value, recipient_email):
-    href = html.escape(unsubscribe_href(recipient_email), quote=True)
-    parts = re.split(r"(?is)(<a\b[^>]*>.*?</a>)", str(value or ""))
-    phrase = re.compile(r"click\s+here\s+to\s+unsubscribe", re.I)
+def link_unsubscribe(value, recipient_email, sender_mailbox=None):
+    href = html.escape(unsubscribe_href(recipient_email, sender_mailbox), quote=True)
+    text = str(value or "")
+    parts = re.split(r"(?is)(<a\b[^>]*>.*?</a>)", text)
+    phrase = re.compile(r"click\s+here\s+to\s+unsubscribe|unsubscribe\s+here|opt[- ]?out", re.I)
+    has_unsub = False
     linked = []
     for part in parts:
         if part.lower().startswith("<a"):
+            if "unsubscribe" in part.lower() or "opt-out" in part.lower():
+                has_unsub = True
             linked.append(part)
             continue
-        linked.append(phrase.sub(lambda match: f'<a href="{href}">{match.group(0)}</a>', part))
-    return "".join(linked)
+        if phrase.search(part):
+            has_unsub = True
+            linked.append(phrase.sub(lambda match: f'<a href="{href}">{match.group(0)}</a>', part))
+        else:
+            linked.append(part)
+    result = "".join(linked)
+    # CAN-SPAM / GDPR requirement: Every bulk email must have an unsubscribe mechanism
+    if not has_unsub and result.strip():
+        footer = (
+            f'<div style="margin-top:32px;padding-top:14px;border-top:1px solid #e2e8f0;'
+            f'font-size:11px;color:#718096;font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,Helvetica,Arial,sans-serif;'
+            f'line-height:1.4;text-align:center;">'
+            f'If you prefer not to receive these emails, you can <a href="{href}" style="color:#4a5568;text-decoration:underline;">unsubscribe here</a>.'
+            f'</div>'
+        )
+        if "</body>" in result.lower():
+            idx = result.lower().rfind("</body>")
+            result = result[:idx] + footer + result[idx:]
+        else:
+            result = result + footer
+    return result
 
 
 def html_to_text(value):
@@ -2260,7 +2351,9 @@ def build_message(sender, recipient_email, subject, html_body, cc_list, attachme
     message["Date"] = email.utils.formatdate(localtime=True)
     domain = sender["user"].split("@", 1)[1] if "@" in sender["user"] else "localhost"
     message["Message-ID"] = email.utils.make_msgid(domain=domain)
-    message["List-Unsubscribe"] = f"<mailto:{UNSUBSCRIBE_ADDRESS}?subject=Unsubscribe>"
+    unsub_contact = sender.get("user") or UNSUBSCRIBE_ADDRESS
+    message["List-Unsubscribe"] = f"<mailto:{unsub_contact}?subject=Unsubscribe>"
+    message["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
     return message
 
 
@@ -2351,7 +2444,7 @@ def deliver(campaign, recipient, sender, limits_ignored=False):
         source_html = template_val
 
     html_body = sanitize_html(apply_variables(source_html, recipient, True))
-    html_body = link_unsubscribe(html_body, recipient["email"])
+    html_body = link_unsubscribe(html_body, recipient["email"], sender.get("user"))
     html_body = apply_email_tracking(html_body)
     fields = parsed_fields(recipient)
     default_cc = campaign["cc"] or ""
@@ -3683,7 +3776,18 @@ def wait_live_turn(sender):
 
 def spam_rejected(message):
     lowered = str(message or "").lower()
-    return "detected as spam" in lowered or ("5.7.1" in lowered and "spam" in lowered)
+    needles = (
+        "detected as spam",
+        "suspicious message",
+        "spam detected",
+        "spamhaus",
+        "poor reputation",
+        "rate limit exceeded",
+        "speed of sending exceeded",
+        "sending quota exceeded",
+        "5.7.26",
+    )
+    return any(token in lowered for token in needles) or ("5.7.1" in lowered and "spam" in lowered)
 
 
 def pause_after_spam():
@@ -4009,6 +4113,18 @@ def process_account_send(campaign_id, sender_id):
         else:
             outcome["status"] = "BOUNCED"
             outcome["error"] = "The recipient's server did not answer. This address was stopped. The sending account was not changed."
+    elif outcome.get("code") == "DISCONNECTED" or "closed the connection" in str(outcome.get("error") or "").lower():
+        tries = _DISCONNECT_RETRY.get(recipient["id"], 0) + 1
+        _DISCONNECT_RETRY[recipient["id"]] = tries
+        purge_sender_pool(sender)
+        clear_dns_cache(sender.get("host"))
+        if tries < 3:
+            outcome = {"status": "QUEUED", "code": "", "error": "", "simulated": False}
+            SLEEP_UNTIL[key] = time.time() + 15
+            log(f"Gmail temporarily closed connection for {sender.get('user') or ''}; {recipient['email']} will be tried again in 15s (try {tries}/3)")
+        else:
+            outcome["status"] = "FAILED"
+            outcome["error"] = f"{sender.get('user') or ''}: Gmail closed the connection after {tries} attempts. The message was not accepted."
     if outcome.get("code") == "SPAM" and "will wait" not in str(outcome.get("error") or ""):
         outcome["error"] = (
             "The recipient server rejected this message as spam. "
@@ -4681,7 +4797,7 @@ class Handler(BaseHTTPRequestHandler):
                     """
                     SELECT email, status, error, smtp_code, sent_at FROM recipients
                     WHERE campaign_id=? AND status IN ('FAILED','BOUNCED')
-                    ORDER BY id DESC LIMIT 12
+                    ORDER BY id DESC LIMIT 150
                     """,
                     (camp["id"],),
                 ).fetchall()

@@ -3339,8 +3339,55 @@ const actions = {
   async "open-campaign"(el) {
     const data = await api(`/api/campaigns/${el.dataset.id}`);
     const campaign = data.campaign;
-    const errors = (campaign.errors || []).map((item) => `<p class="fail-reason"><strong>${esc(item.email)}:</strong> ${esc(item.error || item.status)}</p>`).join("");
-    openModal(`<h3>${esc(campaign.subject)}</h3><p>${esc(campaign.status)} · ${campaign.sent_count} sent · ${campaign.failed_count} failed · ${campaign.bounced_count} bounced</p>${errors || "<p>No failures recorded.</p>"}<button class="btn btn-ghost" type="button" data-action="modal-cancel">Close</button>`);
+    const errors = (campaign.errors || []).map((item) => `
+      <div style="padding:10px 12px;background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.2);border-left:4px solid var(--danger);border-radius:6px;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:3px;gap:8px;">
+          <strong style="color:var(--text);font-size:13px;word-break:break-all;">${esc(item.email)}</strong>
+          <span style="font-size:11px;padding:2px 6px;border-radius:4px;background:rgba(239,68,68,0.15);color:var(--danger);font-weight:600;white-space:nowrap;">${esc(item.status || "FAILED")}</span>
+        </div>
+        <div style="font-size:12px;color:var(--danger);line-height:1.4;word-break:break-word;">${esc(item.error || "Delivery could not be confirmed.")}</div>
+      </div>
+    `).join("");
+
+    const statBox = (label, value, color) => `
+      <div style="padding:8px 10px;background:rgba(255,255,255,0.04);border:1px solid var(--stroke);border-radius:8px;text-align:center;">
+        <div style="font-size:16px;font-weight:700;color:${color || 'var(--text)'};">${value}</div>
+        <div style="font-size:11px;color:var(--faint);text-transform:uppercase;letter-spacing:0.4px;margin-top:2px;">${label}</div>
+      </div>
+    `;
+
+    openModal(`
+      <div class="modal-header">
+        <h3 title="${esc(campaign.subject || "Campaign Details")}">${esc(campaign.subject || "Campaign Details")}</h3>
+        <button class="modal-close-btn" type="button" data-action="modal-cancel" title="Close" aria-label="Close">✕</button>
+      </div>
+      <div class="modal-body">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(75px,1fr));gap:8px;">
+          ${statBox("Status", esc(campaign.status), "var(--accent)")}
+          ${statBox("Sent", campaign.sent_count || 0, "var(--success, #10b981)")}
+          ${statBox("Failed", campaign.failed_count || 0, (campaign.failed_count > 0 ? "var(--danger)" : "var(--faint)"))}
+          ${statBox("Bounced", campaign.bounced_count || 0, (campaign.bounced_count > 0 ? "var(--warn)" : "var(--faint)"))}
+          ${statBox("Total", campaign.total_count || 0)}
+        </div>
+        ${campaign.schedule_at ? `<div class="hint" style="font-size:12px;">Scheduled for: ${esc(stamp(campaign.schedule_at))} (${esc(campaign.timezone || "Local")})</div>` : ""}
+        ${campaign.hold_reason ? `<div class="note" style="margin-top:2px;"><strong>Notice:</strong> ${esc(campaign.hold_reason)}</div>` : ""}
+        <div style="margin-top:4px;">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px;">
+            <strong style="font-size:12px;text-transform:uppercase;letter-spacing:0.5px;color:var(--faint);">
+              ${campaign.errors && campaign.errors.length ? `Delivery Notes & Failures (${campaign.errors.length})` : "Delivery Status"}
+            </strong>
+            ${campaign.errors && campaign.errors.length > 4 ? `<span class="hint" style="font-size:11px;">Scroll down to view all</span>` : ""}
+          </div>
+          <div class="campaign-details-scroll">
+            ${errors || '<p class="hint" style="margin:8px 0;padding:12px;background:rgba(255,255,255,0.02);border:1px dashed var(--stroke);border-radius:8px;text-align:center;">All recipients in this campaign sent without recorded errors.</p>'}
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" type="button" data-action="download-report" data-id="${esc(campaign.id)}">campaign_report.xlsx</button>
+        <button class="btn btn-primary" type="button" data-action="modal-cancel">Close</button>
+      </div>
+    `, true);
     state.modalResolve = null;
   },
   async "remove-user"(el) {
@@ -3428,12 +3475,25 @@ const actions = {
 };
 
 document.addEventListener("click", async (event) => {
+  if (event.target && event.target.id === "modal-root") {
+    finishModal(state.modalMode === "text" ? "" : false);
+    return;
+  }
   const el = event.target.closest("[data-action]");
   if (!el || !actions[el.dataset.action]) return;
   try {
     await actions[el.dataset.action](el, event);
   } catch (error) {
     toast(error.message, "danger");
+  }
+});
+
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    const modal = document.getElementById("modal-root");
+    if (modal && !modal.classList.contains("hidden")) {
+      finishModal(state.modalMode === "text" ? "" : false);
+    }
   }
 });
 
