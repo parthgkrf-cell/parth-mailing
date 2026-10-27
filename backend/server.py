@@ -251,7 +251,8 @@ def init_db():
                 sent_count INTEGER DEFAULT 0,
                 failed_count INTEGER DEFAULT 0,
                 bounced_count INTEGER DEFAULT 0,
-                total_count INTEGER DEFAULT 0
+                total_count INTEGER DEFAULT 0,
+                templates_json TEXT DEFAULT '[]'
             );
             CREATE TABLE IF NOT EXISTS recipients (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -322,6 +323,8 @@ def init_db():
             conn.execute("ALTER TABLE campaigns ADD COLUMN sender_ids_json TEXT DEFAULT '[]'")
         if "drafted_count" not in columns:
             conn.execute("ALTER TABLE campaigns ADD COLUMN drafted_count INTEGER DEFAULT 0")
+        if "templates_json" not in columns:
+            conn.execute("ALTER TABLE campaigns ADD COLUMN templates_json TEXT DEFAULT '[]'")
         rec_cols = {row[1] for row in conn.execute("PRAGMA table_info(recipients)")}
         if "sender_id" not in rec_cols:
             conn.execute("ALTER TABLE recipients ADD COLUMN sender_id TEXT DEFAULT ''")
@@ -2081,11 +2084,11 @@ def apply_variables(template, recipient, escape_values):
     except json.JSONDecodeError:
         fields = {}
     values = {
-        "FirstName": recipient["first_name"] or "",
-        "LastName": recipient["last_name"] or "",
-        "Company": recipient["company"] or "",
-        "Custom1": recipient["custom1"] or "",
-        "Email": recipient["email"] or "",
+        "FirstName": recipient.get("first_name") or "",
+        "LastName": recipient.get("last_name") or "",
+        "Company": recipient.get("company") or "",
+        "Custom1": recipient.get("custom1") or "",
+        "Email": recipient.get("email") or "",
     }
     if isinstance(fields, dict):
         for key, value in fields.items():
@@ -2094,7 +2097,7 @@ def apply_variables(template, recipient, escape_values):
         values["Name"] = values.get("FirstName") or ""
     if not any(name.lower() == "sender" for name in values):
         values["Sender"] = values.get("Sender Name") or values.get("sender_name") or ""
-    receiver = recipient["email"] or ""
+    receiver = recipient.get("email") or ""
     _assign_blank(values, "Receiver email", receiver)
     _assign_blank(values, "Reciver email", receiver)
     sender_mail = ""
@@ -2121,17 +2124,42 @@ def apply_variables(template, recipient, escape_values):
     return re.sub(r"\{([A-Za-z][A-Za-z0-9 _]*)\}", replacer, text)
 
 
+def extract_row_template(item, fields=None):
+    if not isinstance(item, dict):
+        item = {}
+    if not isinstance(fields, dict):
+        fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
+    for k in ("template", "template_name", "templateName", "template_id", "templateId", "tpl"):
+        val = item.get(k)
+        if val is not None and str(val).strip():
+            return str(val).strip()
+    target_names = {"template", "templates", "templatename", "templateid", "emailtemplate"}
+    for k, v in fields.items():
+        if v is None or not str(v).strip():
+            continue
+        compact_k = re.sub(r"[^a-z0-9]+", "", str(k).lower())
+        if compact_k in target_names or compact_k.startswith("template"):
+            return str(v).strip()
+    return ""
+
+
 def field_value(recipient, *names):
     try:
         fields = json.loads(recipient["fields_json"] or "{}")
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, TypeError, KeyError):
         return ""
     if not isinstance(fields, dict):
         return ""
-    lowered = {str(key).lower(): value for key, value in fields.items()}
+    lowered = {str(key).lower().strip(): value for key, value in fields.items()}
     for name in names:
-        if name.lower() in lowered and str(lowered[name.lower()] or "").strip():
-            return str(lowered[name.lower()]).strip()
+        n_low = name.lower().strip()
+        if n_low in lowered and str(lowered[n_low] or "").strip():
+            return str(lowered[n_low]).strip()
+    compact_dict = {re.sub(r"[^a-z0-9]+", "", str(key).lower()): value for key, value in fields.items()}
+    for name in names:
+        c_name = re.sub(r"[^a-z0-9]+", "", name.lower())
+        if c_name and c_name in compact_dict and str(compact_dict[c_name] or "").strip():
+            return str(compact_dict[c_name]).strip()
     return ""
 
 
@@ -2236,20 +2264,105 @@ def build_message(sender, recipient_email, subject, html_body, cc_list, attachme
     return message
 
 
+def resolve_campaign_template(templates, target_key):
+    if not isinstance(templates, list) or not target_key:
+        return None
+    raw = str(target_key).strip()
+    if not raw:
+        return None
+    lower_raw = raw.lower()
+    compact_raw = re.sub(r"[^a-z0-9]+", "", lower_raw)
+    for t in templates:
+        if not isinstance(t, dict):
+            continue
+        name = str(t.get("name") or "").strip().lower()
+        tid = str(t.get("id") or "").strip().lower()
+        if (name and name == lower_raw) or (tid and tid == lower_raw):
+            return t
+    if compact_raw:
+        for t in templates:
+            if not isinstance(t, dict):
+                continue
+            name = str(t.get("name") or "").strip().lower()
+            tid = str(t.get("id") or "").strip().lower()
+            if compact_raw == re.sub(r"[^a-z0-9]+", "", name) or (tid and compact_raw == re.sub(r"[^a-z0-9]+", "", tid)):
+                return t
+    if compact_raw and len(compact_raw) >= 3:
+        for t in templates:
+            if not isinstance(t, dict):
+                continue
+            name_compact = re.sub(r"[^a-z0-9]+", "", str(t.get("name") or "").lower())
+            if name_compact and (compact_raw in name_compact or name_compact in compact_raw):
+                return t
+    if raw.isdigit():
+        for t in templates:
+            if not isinstance(t, dict):
+                continue
+            name = str(t.get("name") or "").strip().lower()
+            m = re.search(r"(\d+)", name)
+            if m and m.group(1) == raw:
+                return t
+    return None
+
+
 def deliver(campaign, recipient, sender, limits_ignored=False):
     del limits_ignored
+    campaign_templates = []
+    try:
+        raw_templates = None
+        if isinstance(campaign, dict):
+            raw_templates = campaign.get("templates_json") or campaign.get("templates")
+        elif hasattr(campaign, "keys") and "templates_json" in campaign.keys():
+            raw_templates = campaign["templates_json"]
+        if raw_templates:
+            if isinstance(raw_templates, list):
+                campaign_templates = raw_templates
+            elif isinstance(raw_templates, str):
+                campaign_templates = json.loads(raw_templates)
+    except Exception:
+        campaign_templates = []
+
+    template_val = field_value(
+        recipient,
+        "Template", "template", "Template Name", "template_name", "Template_Name", "TemplateName",
+        "Email Template", "email_template", "Body", "HTML", "Message", "Templates"
+    ) or str(recipient.get("template") or recipient.get("Template") or "").strip()
+    matched_template = resolve_campaign_template(campaign_templates, template_val) if template_val else None
+
+    if matched_template:
+        log(f"Delivering template '{matched_template.get('name')}' to {recipient.get('email')}")
+    elif template_val:
+        log(f"Template '{template_val}' could not be matched in {len(campaign_templates)} templates; using default")
+
     fields_subject = field_value(recipient, "Subject", "subject")
-    subject = apply_variables(fields_subject or campaign["subject"], recipient, False)
-    template_html = field_value(recipient, "Template", "Body", "HTML", "Message")
+    if fields_subject:
+        subject = apply_variables(fields_subject, recipient, False)
+    elif matched_template and str(matched_template.get("subject") or "").strip():
+        subject = apply_variables(matched_template.get("subject"), recipient, False)
+    else:
+        subject = apply_variables(campaign["subject"], recipient, False)
+
     source_html = campaign["html"]
-    if template_html and ("<" in template_html or not str(source_html or "").strip()):
-        source_html = template_html
+    if matched_template:
+        t_html = matched_template.get("rawHtml") or matched_template.get("html") or matched_template.get("body_html") or ""
+        if str(t_html).strip():
+            source_html = t_html
+    elif template_val and ("<" in template_val or not str(source_html or "").strip()):
+        source_html = template_val
+
     html_body = sanitize_html(apply_variables(source_html, recipient, True))
     html_body = link_unsubscribe(html_body, recipient["email"])
     html_body = apply_email_tracking(html_body)
     fields = parsed_fields(recipient)
-    cc_raw = row_copy(fields, CC_FIELD_KEYS, campaign["cc"] or "")
-    bcc_raw = row_copy(fields, BCC_FIELD_KEYS, campaign["bcc"] or "")
+    default_cc = campaign["cc"] or ""
+    default_bcc = campaign["bcc"] or ""
+    if matched_template:
+        if not default_cc and matched_template.get("cc"):
+            default_cc = matched_template.get("cc")
+        if not default_bcc and matched_template.get("bcc"):
+            default_bcc = matched_template.get("bcc")
+    cc_raw = row_copy(fields, CC_FIELD_KEYS, default_cc)
+    bcc_raw = row_copy(fields, BCC_FIELD_KEYS, default_bcc)
     cc_list, cc_bad = split_address_list(cc_raw)
     bcc_list, bcc_bad = split_address_list(bcc_raw)
     if cc_bad or bcc_bad:
@@ -2656,7 +2769,7 @@ SHEET_HEADERS = {
     "last": {"lastname", "last name", "last", "surname", "family name"},
     "company": {"company", "organization", "organisation", "org", "affiliation", "institution"},
     "custom": {"custom1", "custom", "note", "tag", "segment"},
-    "template": {"template", "html", "body", "message", "email body"},
+    "template": {"template", "templates", "template name", "templatename", "template_name", "template id", "templateid", "email template", "emailtemplate", "html", "body", "message", "email body"},
     "sender": {"sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address", "send from", "send using", "sending account", "from account", "mail from", "sender account", "from mailbox", "email account"},
     "sender_name": {"sender name", "from name", "displayname", "display name", "sendername", "sender display name", "name of sender"},
     "cc": {"cc", "cc email", "cc mail", "cc address", "carbon copy", "copy to", "email cc"},
@@ -5283,6 +5396,8 @@ class Handler(BaseHTTPRequestHandler):
             with open(path, "wb") as handle:
                 handle.write(raw)
             stored.append((filename, mime, path))
+        templates_raw = data.get("templates")
+        templates_json = json.dumps(templates_raw if isinstance(templates_raw, list) else [])
         with db() as conn:
             if not sender_allowed(conn, user["email"], user["role"], sender["id"]):
                 raise ApiError("That sender identity is not approved for your account.", 403)
@@ -5290,13 +5405,15 @@ class Handler(BaseHTTPRequestHandler):
                 """
                 INSERT INTO campaigns (
                     id, owner, sender_id, subject, html, cc, bcc, status, schedule_at, timezone,
-                    pace_json, hold_reason, created_at, total_count, dispatch_action, sender_ids_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, '', ?, 0, ?, ?)
+                    pace_json, hold_reason, created_at, total_count, dispatch_action, sender_ids_json,
+                    templates_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, 'ready', ?, ?, ?, '', ?, 0, ?, ?, ?)
                 """,
                 (
                     campaign_id, user["email"], sender["id"], subject, html_body, cc, bcc,
                     schedule_at, timezone, json.dumps(pace), time.time(), action,
                     json.dumps([item["id"] for item in pool]),
+                    templates_json,
                 ),
             )
             for filename, mime, path in stored:
@@ -5371,8 +5488,9 @@ class Handler(BaseHTTPRequestHandler):
                 seen.add(slot)
                 fields = item.get("fields") if isinstance(item.get("fields"), dict) else {}
                 trimmed = {}
+                tpl = extract_row_template(item, fields)
                 extra = {
-                    "Template": item.get("template") or fields.get("Template") or fields.get("template"),
+                    "Template": tpl,
                     "Sender": item.get("sender") or fields.get("Sender") or fields.get("sender"),
                     "Sender Name": item.get("sender_name") or fields.get("Sender Name") or fields.get("sender_name"),
                     "Name": item.get("first_name") or fields.get("Name") or fields.get("name"),

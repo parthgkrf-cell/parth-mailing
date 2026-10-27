@@ -6,7 +6,8 @@ const {
   applyMerge,
   applyEmailTracking,
   loadGa4Settings,
-  resolveSendableAccount
+  resolveSendableAccount,
+  findTemplate
 } = require('./campaign');
 
 let isProcessing = false;
@@ -51,16 +52,34 @@ async function processDueSchedules() {
       const next = rows[processedCount];
       const ownerRow = await get('SELECT id, role FROM users WHERE id = ?', [job.user_id]);
       const owner = ownerRow || { id: job.user_id, role: 'user' };
-      const templates = await all(
+      let clientTemplates = [];
+      try {
+        if (job.templates_json) {
+          const parsed = JSON.parse(job.templates_json);
+          if (Array.isArray(parsed)) {
+            clientTemplates = parsed.map((t) => ({
+              id: t.id,
+              name: t.name,
+              subject: t.subject,
+              body_html: t.rawHtml || t.html || t.body_html || '',
+              cc: t.cc,
+              bcc: t.bcc
+            }));
+          }
+        }
+      } catch (e) {}
+
+      const dbTemplates = await all(
         'SELECT * FROM email_templates WHERE user_id = ? OR is_shared = 1',
         [job.user_id]
       );
-      const wantedTemplate = String(next.template || '').trim().toLowerCase();
-      const template = wantedTemplate
-        ? templates.find((item) => String(item.name).toLowerCase() === wantedTemplate)
-        : null;
-      const mergedSubject = applyMerge(template ? template.subject : job.subject, next);
-      const mergedHtml = applyEmailTracking(applyMerge(template ? template.body_html : job.body_html, next), tracking);
+      const templates = [...clientTemplates, ...dbTemplates];
+      const wantedTemplate = String(next.template || '').trim();
+      const template = wantedTemplate.includes('<') && wantedTemplate.includes('>')
+        ? { name: 'Inline HTML', body_html: wantedTemplate, subject: '' }
+        : findTemplate(templates, wantedTemplate);
+      const mergedSubject = applyMerge((template && template.subject) ? template.subject : job.subject, next);
+      const mergedHtml = applyEmailTracking(applyMerge((template && template.body_html) ? template.body_html : job.body_html, next), tracking);
       const mergedText = applyMerge(template ? '' : (job.body_text || ''), next);
 
       const account = await resolveSendableAccount(owner, next.smtp_account_id || job.smtp_account_id, next.sender);

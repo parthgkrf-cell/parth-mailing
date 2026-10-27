@@ -164,11 +164,17 @@ const initDB = async () => {
         status TEXT DEFAULT 'scheduled', -- 'scheduled', 'sending', 'completed', 'paused', 'cancelled', 'failed'
         interval_seconds INTEGER DEFAULT 15, -- Google compliance delay between sends
         random_jitter INTEGER DEFAULT 8,
+        templates_json TEXT DEFAULT '[]',
         created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
         completed_at DATETIME,
         FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
       )
     `);
+
+    const scheduledCols = await all('PRAGMA table_info(scheduled_emails)');
+    if (!scheduledCols.some((col) => col.name === 'templates_json')) {
+      await run("ALTER TABLE scheduled_emails ADD COLUMN templates_json TEXT DEFAULT '[]'");
+    }
 
     // Email logs table
     await run(`

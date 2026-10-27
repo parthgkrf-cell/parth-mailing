@@ -139,6 +139,23 @@ async function resolveSendableAccount(user, accountId, senderHint) {
   return allowed[0] || null;
 }
 
+function extractRowTemplate(item) {
+  if (!item) return '';
+  if (item.template && String(item.template).trim()) return String(item.template).trim();
+  if (item.template_name && String(item.template_name).trim()) return String(item.template_name).trim();
+  if (item.fields && typeof item.fields === 'object') {
+    const keys = Object.keys(item.fields);
+    for (const key of keys) {
+      const compact = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (['template', 'templates', 'templatename', 'templateid', 'emailtemplate'].includes(compact) || compact.startsWith('template')) {
+        const val = String(item.fields[key] || '').trim();
+        if (val) return val;
+      }
+    }
+  }
+  return '';
+}
+
 function parseRecipientPayload(raw) {
   if (!raw) return [];
   if (Array.isArray(raw)) {
@@ -151,7 +168,7 @@ function parseRecipientPayload(raw) {
         last_name: item.last_name || '',
         company: item.company || item.affiliation || '',
         affiliation: item.affiliation || item.company || '',
-        template: item.template || item.template_name || '',
+        template: extractRowTemplate(item),
         sender: item.sender || item.sender_email || '',
         sender_name: item.sender_name || item.from_name || '',
         smtp_account_id: item.smtp_account_id || null,
@@ -177,6 +194,37 @@ function parseRecipientPayload(raw) {
     .map((email) => ({ email: normalizeEmail(email) }));
 }
 
+function findTemplate(templates, wanted) {
+  if (!wanted || !Array.isArray(templates)) return null;
+  const raw = String(wanted).trim().toLowerCase();
+  if (!raw) return null;
+  const compact = raw.replace(/[^a-z0-9]/g, '');
+  let found = templates.find((item) => String(item.name || '').trim().toLowerCase() === raw || String(item.id || '').trim().toLowerCase() === raw);
+  if (found) return found;
+  if (compact) {
+    found = templates.find((item) => (
+      String(item.name || '').toLowerCase().replace(/[^a-z0-9]/g, '') === compact ||
+      String(item.id || '').toLowerCase().replace(/[^a-z0-9]/g, '') === compact
+    ));
+    if (found) return found;
+  }
+  if (compact && compact.length >= 3) {
+    found = templates.find((item) => {
+      const nameCompact = String(item.name || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+      return nameCompact && (nameCompact.includes(compact) || compact.includes(nameCompact));
+    });
+    if (found) return found;
+  }
+  if (/^\d+$/.test(raw)) {
+    found = templates.find((item) => {
+      const match = String(item.name || '').match(/(\d+)/);
+      return match && match[1] === raw;
+    });
+    if (found) return found;
+  }
+  return null;
+}
+
 module.exports = {
   defaultGa4,
   loadGa4Settings,
@@ -186,5 +234,6 @@ module.exports = {
   listSendableAccounts,
   resolveSendableAccount,
   parseRecipientPayload,
-  normalizeEmail
+  normalizeEmail,
+  findTemplate
 };

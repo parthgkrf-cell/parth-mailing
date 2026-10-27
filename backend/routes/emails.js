@@ -12,7 +12,8 @@ const {
   loadGa4Settings,
   tagUrlForGa4,
   listSendableAccounts,
-  resolveSendableAccount
+  resolveSendableAccount,
+  findTemplate
 } = require('../services/campaign');
 
 // Check compliance & Spam score preview
@@ -327,7 +328,7 @@ router.get('/schedules', requireAuth, async (req, res) => {
 
 router.post('/schedules', requireAuth, async (req, res) => {
   try {
-    const { subject, recipients, body_html, body_text, scheduled_for, smtp_account_id, interval_seconds = 15, random_jitter = 8 } = req.body;
+    const { subject, recipients, body_html, body_text, scheduled_for, smtp_account_id, interval_seconds = 15, random_jitter = 8, templates = [] } = req.body;
 
     const recipientRows = parseRecipientPayload(recipients);
     const recipientList = recipientRows.map((row) => row.email);
@@ -362,12 +363,13 @@ router.post('/schedules', requireAuth, async (req, res) => {
     const defaultJitter = Math.min(60, Math.max(0, Number(await getSetting('default_jitter_seconds', '8')) || 0));
     const safeInterval = Math.max(minInterval, Number(interval_seconds) || minInterval);
     const safeJitter = Math.max(0, Number.isFinite(Number(random_jitter)) ? Number(random_jitter) : defaultJitter);
+    const templatesJson = JSON.stringify(Array.isArray(templates) ? templates : []);
 
     const result = await run(
       `INSERT INTO scheduled_emails (
         user_id, smtp_account_id, subject, recipients, total_recipients, sent_count, failed_count,
-        body_html, body_text, scheduled_for, status, interval_seconds, random_jitter, created_at
-      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 'scheduled', ?, ?, ?)`,
+        body_html, body_text, scheduled_for, status, interval_seconds, random_jitter, templates_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, 'scheduled', ?, ?, ?, ?)`,
       [
         req.user.id,
         smtp_account_id || null,
@@ -379,6 +381,7 @@ router.post('/schedules', requireAuth, async (req, res) => {
         scheduledDate.toISOString(),
         safeInterval,
         safeJitter,
+        templatesJson,
         new Date().toISOString()
       ]
     );
@@ -450,16 +453,20 @@ router.post('/send-now', requireAuth, async (req, res) => {
     }
 
     const tracking = await loadGa4Settings();
-    const templates = await listVisibleTemplates(req.user);
+    const clientTemplates = Array.isArray(req.body.templates)
+      ? req.body.templates.map((t) => ({ name: t.name, subject: t.subject, body_html: t.rawHtml || t.html || t.body_html || '', id: t.id }))
+      : [];
+    const dbTemplates = await listVisibleTemplates(req.user);
+    const templates = [...clientTemplates, ...dbTemplates];
     const results = [];
     let lastAccount = null;
     for (const row of recipientRows) {
-      const wantedTemplate = String(row.template || '').trim().toLowerCase();
-      const template = wantedTemplate
-        ? templates.find((item) => String(item.name).toLowerCase() === wantedTemplate)
-        : null;
-      const mergedSubject = applyMerge(template ? template.subject : subject, row);
-      const mergedHtml = applyEmailTracking(applyMerge(template ? template.body_html : body_html, row), tracking);
+      const wantedTemplate = String(row.template || '').trim();
+      const template = wantedTemplate.includes('<') && wantedTemplate.includes('>')
+        ? { name: 'Inline HTML', body_html: wantedTemplate, subject: '' }
+        : findTemplate(templates, wantedTemplate);
+      const mergedSubject = applyMerge((template && template.subject) ? template.subject : subject, row);
+      const mergedHtml = applyEmailTracking(applyMerge((template && template.body_html) ? template.body_html : body_html, row), tracking);
       const mergedText = applyMerge(template ? (template.body_html || '').replace(/<[^>]*>?/gm, ' ') : (body_text || ''), row);
       const requestedAccount = row.smtp_account_id || smtp_account_id;
       const account = await resolveSendableAccount(req.user, requestedAccount, row.sender);

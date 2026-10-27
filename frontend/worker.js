@@ -17,7 +17,7 @@ const HEADER_SETS = {
   last: new Set(["lastname", "last name", "last", "surname", "family name", "familyname"]),
   company: new Set(["company", "organization", "organisation", "org", "affiliation", "institution"]),
   custom: new Set(["custom1", "custom", "note", "tag", "segment"]),
-  template: new Set(["template", "html", "body", "message", "email body", "emailbody"]),
+  template: new Set(["template", "templates", "template name", "templatename", "template_name", "template id", "templateid", "email template", "emailtemplate", "html", "body", "message", "email body", "emailbody"]),
   sender: new Set(["sender", "from", "from email", "sender email", "mailbox", "account email", "mailing email", "sending email", "from address", "send from", "send using", "sending account", "from account", "mail from", "sender account", "from mailbox", "email account"]),
   sender_name: new Set(["sender name", "from name", "displayname", "display name", "sendername", "sender display name", "name of sender"]),
   cc: new Set(["cc", "cc email", "cc mail", "cc address", "carbon copy", "copy to", "email cc"]),
@@ -145,7 +145,16 @@ function rowFrom(values, mapper, headers, extraFields) {
     fields[columnLetter(index)] = value;
   }
   const firstName = cell(values, mapper.first);
-  const template = cell(values, mapper.template);
+  let template = cell(values, mapper.template);
+  if (!template) {
+    for (const key of Object.keys(fields)) {
+      const k = key.trim().toLowerCase().replace(/[^a-z0-9]/g, "");
+      if (["template", "templates", "templatename", "templateid", "emailtemplate"].includes(k)) {
+        template = String(fields[key] || "").trim();
+        break;
+      }
+    }
+  }
   let sender = cell(values, mapper.sender);
   let senderName = cell(values, mapper.sender_name);
   const copy = cell(values, mapper.cc);

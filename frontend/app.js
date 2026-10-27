@@ -266,6 +266,7 @@ function renderView() {
     master: htmlMaster,
   };
   root.innerHTML = (views[state.view] || htmlHome)();
+  root.classList.toggle("is-preview", state.view === "preview");
   paintChrome();
   icons();
   if (state.focus) {
@@ -484,6 +485,49 @@ function rowSenderName(row) {
   return "";
 }
 
+function rowTemplateName(row) {
+  if (!row) return "";
+  if (row.template && String(row.template).trim()) return String(row.template).trim();
+  const loose = looseField(row, ["template", "templates", "templatename", "templateid", "emailtemplate"]);
+  if (loose) return loose;
+  return fieldOf(row, "Template", "template", "Template Name", "template_name", "Template_Name", "TemplateName", "Template ID", "Email Template");
+}
+
+function resolveRowTemplate(row) {
+  if (!row) return null;
+  const target = rowTemplateName(row);
+  if (!target) return null;
+  if (target.includes("<") && target.includes(">")) {
+    return { name: "Inline HTML", rawHtml: target, subject: "" };
+  }
+  const lower = target.toLowerCase();
+  const compact = lower.replace(/[^a-z0-9]+/g, "");
+  let found = state.templates.find((t) => (t.name && t.name.trim().toLowerCase() === lower) || (t.id && t.id.trim().toLowerCase() === lower));
+  if (found) return found;
+  if (compact) {
+    found = state.templates.find((t) => (
+      (t.name && t.name.toLowerCase().replace(/[^a-z0-9]+/g, "") === compact) ||
+      (t.id && String(t.id).toLowerCase().replace(/[^a-z0-9]+/g, "") === compact)
+    ));
+    if (found) return found;
+  }
+  if (compact && compact.length >= 3) {
+    found = state.templates.find((t) => {
+      const nameCompact = (t.name || "").toLowerCase().replace(/[^a-z0-9]+/g, "");
+      return nameCompact && (nameCompact.includes(compact) || compact.includes(nameCompact));
+    });
+    if (found) return found;
+  }
+  if (/^\d+$/.test(target)) {
+    found = state.templates.find((t) => {
+      const match = (t.name || "").match(/(\d+)/);
+      return match && match[1] === target;
+    });
+    if (found) return found;
+  }
+  return null;
+}
+
 function htmlCompose() {
   const approved = state.catalog.filter((sender) => sender.status === "approved");
   return `
@@ -501,18 +545,27 @@ function htmlCompose() {
 
 function htmlPreview() {
   const rows = mergedRecipients();
+  const currentIndex = state.previewIndex || 0;
   const options = rows.slice(0, 400).map((row, index) => {
-    const label = `${row.email}${row.first_name ? " · " + row.first_name : ""}`;
-    return `<option value="${index}" ${index === state.previewIndex ? "selected" : ""}>${esc(label)}</option>`;
+    const label = `${index + 1}. ${row.email}${row.first_name ? " · " + row.first_name : ""}`;
+    return `<option value="${index}" ${index === currentIndex ? "selected" : ""}>${esc(label)}</option>`;
   }).join("");
+  const total = rows.length;
+  const countLabel = total ? `${(currentIndex + 1).toLocaleString()} of ${total.toLocaleString()}` : "0 recipients";
   return `
-    <section class="card glass stack">
-      <h3>Recipient preview</h3>
-      <p class="hint">Pick a row from the imported Excel list. Sender email and Receiver email come from that row. A link opens in a new tab. Click here to unsubscribe opens a Gmail message to conference.ictcs@gmail.com.</p>
-      <label>Recipient
-        <select id="preview-pick" class="input">${options || "<option>Import Excel first</option>"}</select>
-      </label>
-      <p id="preview-meta" class="hint"></p>
+    <section class="card glass stack preview-card">
+      <div class="preview-top-bar">
+        <div class="preview-title-group">
+          <h3>Recipient preview</h3>
+          <span class="hint" id="preview-count">${countLabel}</span>
+        </div>
+        <div class="preview-nav-group">
+          <button type="button" class="btn btn-ghost icon-btn" data-action="preview-prev" title="Previous recipient" ${currentIndex <= 0 ? "disabled" : ""}><i data-lucide="chevron-left"></i></button>
+          <select id="preview-pick" class="input preview-select" title="Choose recipient to preview">${options || "<option>Import Excel first</option>"}</select>
+          <button type="button" class="btn btn-ghost icon-btn" data-action="preview-next" title="Next recipient" ${currentIndex >= total - 1 ? "disabled" : ""}><i data-lucide="chevron-right"></i></button>
+        </div>
+      </div>
+      <div id="preview-meta" class="preview-meta"></div>
       <iframe id="preview-frame" class="preview-frame" title="Message preview"></iframe>
     </section>`;
 }
@@ -1096,7 +1149,7 @@ function applyDesk() {
 function refreshFilter() {
   const query = state.recipientQuery.trim().toLowerCase();
   state.filtered = query
-    ? state.recipients.filter((row) => `${row.email} ${row.first_name} ${row.last_name} ${row.company} ${row.template || ""} ${row.sender_name || ""}`.toLowerCase().includes(query))
+    ? state.recipients.filter((row) => `${row.email} ${row.first_name} ${row.last_name} ${row.company} ${row.template || ""} ${rowTemplateName(row)} ${row.sender_name || ""}`.toLowerCase().includes(query))
     : state.recipients;
   if (state.redraw) state.redraw();
 }
@@ -1114,15 +1167,18 @@ function mountRecipients() {
     const count = Math.ceil(scroller.clientHeight / ROW_HEIGHT) + 10;
     const slice = rows.slice(start, start + count);
     list.style.transform = `translateY(${start * ROW_HEIGHT}px)`;
-    list.innerHTML = slice.map((row, index) => `
+    list.innerHTML = slice.map((row, index) => {
+      const tplName = rowTemplateName(row);
+      return `
       <div class="rrow rgrid">
         <span>${(start + index + 1).toLocaleString()}</span>
-        <span>${esc(row.email)}</span>
+        <span>${esc(row.email)}${tplName ? `<br><small style="color:var(--brand);font-weight:600" title="Template: ${esc(tplName)}">📄 ${esc(tplName)}</small>` : ""}</span>
         <span>${esc(rowSendingAccount(row))}</span>
         <span>${esc(row.first_name || fieldOf(row, "Name"))}</span>
         <span>${esc(rowSenderName(row))}</span>
         <span>${esc(looseField(row, CC_KEYS))}</span>
-      </div>`).join("");
+      </div>`;
+    }).join("");
     const valid = document.getElementById("stat-valid");
     if (valid) valid.textContent = `${state.recipients.length.toLocaleString()} ready`;
   };
@@ -1225,7 +1281,7 @@ function applyVars(template, row) {
     Email: row.email || "",
     Name: row.first_name || "",
     Sender: fieldOf(row, "Sender Name", "Sender") || row.sender_name || "",
-    Template: fieldOf(row, "Template") || row.template || "",
+    Template: rowTemplateName(row),
   }, row.fields || {});
   if (row.email && !String(map["Receiver email"] || map["Reciver email"] || "").trim()) map["Receiver email"] = row.email;
   const senderMail = rowSendingAccount(row);
@@ -1248,9 +1304,19 @@ function updatePreview() {
     preview.textContent = "Add recipients to preview personalization.";
     return;
   }
-  const subject = applyVars(document.getElementById("subject-input").value, row);
-  const body = applyVars(document.getElementById("editor").innerText, row).replace(/\s+/g, " ").trim();
-  preview.textContent = `Preview for ${row.email}: ${subject || "(no subject)"} — ${body.slice(0, 180)}`;
+  const matched = resolveRowTemplate(row);
+  let subjectText = (document.getElementById("subject-input") || {}).value || "";
+  let bodyText = (document.getElementById("editor") || {}).innerText || "";
+  let templateTag = "";
+  if (matched) {
+    if (matched.subject) subjectText = matched.subject;
+    const rawContent = matched.rawHtml || matched.html || "";
+    bodyText = plainFromHtml(rawContent) || bodyText;
+    templateTag = ` [${matched.name}]`;
+  }
+  const subject = applyVars(subjectText, row);
+  const body = applyVars(bodyText, row).replace(/\s+/g, " ").trim();
+  preview.textContent = `Preview for ${row.email}${templateTag}: ${subject || "(no subject)"} — ${body.slice(0, 180)}`;
 }
 
 function mergedRecipients() {
@@ -1536,7 +1602,7 @@ function renderTemplates() {
   const remove = state.templates.length > 1
     ? `<button type="button" class="template-chip" data-action="template-delete">Delete</button>`
     : "";
-  list.innerHTML = `${chips}<button type="button" class="template-chip" data-action="template-new">New</button><button type="button" class="template-chip" data-action="template-html">Add HTML</button>${remove}`;
+  list.innerHTML = `${chips}<button type="button" class="template-chip" data-action="template-new">New</button><button type="button" class="template-chip" data-action="template-html">Add HTML</button><button type="button" class="template-chip" data-action="template-rename">Rename</button>${remove}`;
 }
 
 function liveCampaign() {
@@ -1681,14 +1747,20 @@ function paintSendLabel() {
 }
 
 function saveRange() {
+  const modal = document.getElementById("modal-root");
+  if (modal && !modal.classList.contains("hidden")) return;
+  const editor = document.getElementById("editor");
   const selection = window.getSelection();
-  if (selection && selection.rangeCount && document.getElementById("editor").contains(selection.anchorNode)) {
+  if (selection && selection.rangeCount && editor && editor.contains(selection.anchorNode)) {
     state.range = selection.getRangeAt(0).cloneRange();
+    const str = selection.toString();
+    state.selectedText = str ? str.trim() : "";
   }
 }
 
 function restoreRange() {
   const editor = document.getElementById("editor");
+  if (!editor) return;
   editor.focus();
   if (!state.range) return;
   const selection = window.getSelection();
@@ -1758,11 +1830,21 @@ async function importFiles(fileList, options) {
   rememberSheetAddresses();
   const readyCount = state.recipients.length;
   const invalidCount = state.stats.invalid || 0;
+  const templateHits = new Set();
+  state.recipients.forEach((r) => {
+    const t = rowTemplateName(r);
+    if (t) templateHits.add(t);
+  });
   if (!readyCount) {
     toast(invalidCount
       ? `0 recipients ready. ${invalidCount.toLocaleString()} rows did not contain an email address.`
       : "0 recipients ready. That file had no recipient rows.", "warn");
-  } else toast(`${readyCount.toLocaleString()} recipients ready`);
+  } else if (templateHits.size > 0) {
+    const names = Array.from(templateHits);
+    toast(`${readyCount.toLocaleString()} recipients ready · Template column: ${names.slice(0, 3).join(", ")}${names.length > 3 ? "..." : ""}`);
+  } else {
+    toast(`${readyCount.toLocaleString()} recipients ready`);
+  }
 }
 
 function runWorker(file) {
@@ -1933,10 +2015,12 @@ async function sendCampaign(action, options) {
   const sheetAccounts = [...new Set(rows.map((row) => rowSendingAccount(row)).filter(Boolean))];
   const sheetNames = [...new Set(rows.map((row) => rowSenderName(row)).filter(Boolean))];
   const sheetCopies = [...new Set(rows.map((row) => looseField(row, CC_KEYS)).filter(Boolean))];
+  const sheetTemplates = [...new Set(rows.map((row) => rowTemplateName(row)).filter(Boolean))];
   const sheetNote = [
     sheetAccounts.length ? `Sheet sends from ${sheetAccounts.slice(0, 3).join(", ")}.` : "No Account Email column, so the From box chooses the mailbox.",
     sheetNames.length ? `The name on the message is ${sheetNames.slice(0, 3).join(", ")}.` : "",
     sheetCopies.length ? `CC ${sheetCopies.slice(0, 3).join(", ")}.` : "",
+    sheetTemplates.length ? `Templates: ${sheetTemplates.slice(0, 3).join(", ")}${sheetTemplates.length > 3 ? "..." : ""}.` : "",
   ].filter(Boolean).join(" ");
   const agreed = await askConfirm(
     scheduled ? (mode === "draft" ? "Schedule SMTP Draft?" : "Schedule SMTP Send?") : (mode === "draft" ? "SMTP Draft all emails?" : "Start SMTP Send?"),
@@ -1944,6 +2028,7 @@ async function sendCampaign(action, options) {
     scheduled ? "Schedule" : (mode === "draft" ? "Draft" : "Send")
   );
   if (!agreed) return;
+  captureTemplate();
   state.sending = true;
   try {
     const created = await api("/api/campaigns", {
@@ -1960,6 +2045,7 @@ async function sendCampaign(action, options) {
         schedule_at: scheduleAt,
         timezone: zone,
         attachments: state.attachments,
+        templates: state.templates,
       }),
     });
     const id = created.campaign.id;
@@ -1967,9 +2053,20 @@ async function sendCampaign(action, options) {
     let alreadySent = 0;
     for (let index = 0; index < rows.length; index += chunk) {
       toast(`Uploading recipients ${Math.min(index + chunk, rows.length).toLocaleString()} / ${rows.length.toLocaleString()}`);
+      const chunkRows = rows.slice(index, index + chunk).map((r) => {
+        const tplName = rowTemplateName(r);
+        const clonedFields = Object.assign({}, r.fields || {});
+        if (tplName) {
+          clonedFields.Template = tplName;
+        }
+        return Object.assign({}, r, {
+          template: tplName || r.template || "",
+          fields: clonedFields,
+        });
+      });
       const added = await api(`/api/campaigns/${id}/recipients`, {
         method: "POST",
-        body: JSON.stringify({ rows: rows.slice(index, index + chunk), replace: index === 0 }),
+        body: JSON.stringify({ rows: chunkRows, replace: index === 0 }),
       });
       alreadySent += added.already_sent || 0;
     }
@@ -2259,12 +2356,14 @@ function savedGa4Builder() {
   let saved = {};
   try { saved = JSON.parse(localStorage.getItem("parth.ga4builder") || "{}"); } catch (error) { saved = {}; }
   const tracking = state.tracking || {};
+  const tpl = activeTemplate();
+  const fallbackCampaign = (tracking.campaign || (tpl && tpl.name ? tpl.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") : "") || "campaign").replace(/^-+|-+$/g, "");
   return {
     url: saved.url || "",
     text: saved.text || "",
     source: saved.source || tracking.source || "parth-mailing",
     medium: saved.medium || tracking.medium || "email",
-    campaign: saved.campaign || tracking.campaign || "",
+    campaign: saved.campaign || fallbackCampaign,
     term: saved.term || tracking.term || "",
     content: saved.content || tracking.content || "",
   };
@@ -2298,43 +2397,62 @@ function paintGa4Preview() {
   const built = document.getElementById("ga4-built");
   if (!built) return "";
   const values = readGa4Builder();
-  if (!/^https?:\/\//i.test(values.url)) {
+  let url = (values.url || "").trim();
+  if (!url) {
     built.value = "";
     return "";
   }
-  const link = buildGa4Link(values);
-  built.value = link === values.url && !values.campaign && !values.source ? "" : link;
+  if (!/^https?:\/\//i.test(url)) {
+    url = "https://" + url;
+  }
+  const link = buildGa4Link(Object.assign({}, values, { url }));
+  built.value = link === url && !values.campaign && !values.source ? "" : link;
   return built.value;
 }
 
 function openGa4Builder() {
+  saveRange();
   const saved = savedGa4Builder();
+  const selected = (state.selectedText || "").trim();
+  const initialText = selected || saved.text || "";
   setComposerMode(document.getElementById("composer").classList.contains("is-max") ? "max" : "dock");
   openModal(`
     <h3>GA4 tracker</h3>
-    <p>Build a link, then insert it in the message. GA4 shows the visit under Reports, Acquisition, Traffic acquisition. The website already needs its GA4 tag.</p>
-    <label>Website address<input id="ga4-url" class="input" placeholder="https://example.com/register" value="${esc(saved.url)}"></label>
-    <label>Link text<input id="ga4-text" class="input" placeholder="Register now" value="${esc(saved.text)}"></label>
+    <p>Paste your website link below. Selected text in Composer will automatically get the GA4 tracking link attached.</p>
+    <label>Website address<input id="ga4-url" class="input" placeholder="https://example.com" value="${selected ? "" : esc(saved.url)}"></label>
+    <label>Link text<input id="ga4-text" class="input" placeholder="e.g. Visit our website" value="${esc(initialText)}"></label>
     <div class="config-grid">
-      <label>Campaign<input id="ga4-b-campaign" class="input" placeholder="october-invite" value="${esc(saved.campaign)}"></label>
+      <label>Campaign<input id="ga4-b-campaign" class="input" placeholder="newsletter" value="${esc(saved.campaign)}"></label>
       <label>Source<input id="ga4-b-source" class="input" placeholder="parth-mailing" value="${esc(saved.source)}"></label>
       <label>Medium<input id="ga4-b-medium" class="input" placeholder="email" value="${esc(saved.medium)}"></label>
-      <label>Content<input id="ga4-b-content" class="input" placeholder="header-button" value="${esc(saved.content)}"></label>
+      <label>Content<input id="ga4-b-content" class="input" placeholder="button" value="${esc(saved.content)}"></label>
     </div>
     <label>Term<input id="ga4-b-term" class="input" placeholder="optional" value="${esc(saved.term)}"></label>
-    <label>Tracked link<input id="ga4-built" class="input" readonly></label>
+    <label>Tracked link<input id="ga4-built" class="input" readonly placeholder="Tracked link preview"></label>
     <div class="row">
       <button class="btn btn-ghost" type="button" data-action="modal-cancel">Cancel</button>
       <button class="btn btn-ghost" type="button" data-action="ga4-copy">Copy link</button>
-      <button class="btn btn-primary" type="button" data-action="ga4-insert">Insert in composer</button>
+      <button class="btn btn-primary" type="button" data-action="ga4-insert">Insert link</button>
     </div>`, true);
+
   ["ga4-url", "ga4-text", "ga4-b-campaign", "ga4-b-source", "ga4-b-medium", "ga4-b-content", "ga4-b-term"].forEach((id) => {
     const field = document.getElementById(id);
-    if (field) field.addEventListener("input", paintGa4Preview);
+    if (field) {
+      field.addEventListener("input", paintGa4Preview);
+      field.addEventListener("keydown", (e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          actions["ga4-insert"]();
+        }
+      });
+    }
   });
   paintGa4Preview();
   const url = document.getElementById("ga4-url");
-  if (url) url.focus();
+  if (url) {
+    url.focus();
+    url.select();
+  }
 }
 
 function rememberGa4Builder(values) {
@@ -2342,29 +2460,114 @@ function rememberGa4Builder(values) {
 }
 
 function insertBuiltLink(url, text) {
-  const label = text || url;
-  const anchor = `<a href="${esc(url)}">${esc(label)}</a>`;
   const current = activeTemplate();
+  const selectedText = (state.selectedText || "").trim();
+  const label = (text || "").trim() || selectedText || url;
+  const anchorHtml = `<a href="${esc(url)}">${esc(label)}</a>`;
   if (current && current.rawHtml) {
-    if (/<\/body>/i.test(current.rawHtml)) current.rawHtml = current.rawHtml.replace(/<\/body>/i, `${anchor}</body>`);
-    else current.rawHtml += anchor;
+    if (/<\/body>/i.test(current.rawHtml)) current.rawHtml = current.rawHtml.replace(/<\/body>/i, `${anchorHtml}</body>`);
+    else current.rawHtml += anchorHtml;
     applyTemplate(current);
     persistTemplates();
     return;
   }
   const editor = document.getElementById("editor");
   if (!editor) return;
-  editor.focus();
-  document.execCommand("insertHTML", false, anchor);
+
+  try {
+    const range = state.range;
+    let existingLink = null;
+    if (range && editor.contains(range.commonAncestorContainer)) {
+      let node = range.commonAncestorContainer;
+      while (node && node !== editor) {
+        if (node.nodeType === 1 && node.tagName === "A") {
+          existingLink = node;
+          break;
+        }
+        node = node.parentNode;
+      }
+    }
+
+    if (existingLink) {
+      existingLink.href = url;
+      if (text && text.trim()) {
+        existingLink.textContent = text.trim();
+      }
+    } else if (range && editor.contains(range.commonAncestorContainer)) {
+      const a = document.createElement("a");
+      a.href = url;
+      if (!range.collapsed) {
+        if (text && text.trim() && text.trim() !== selectedText) {
+          a.textContent = text.trim();
+          range.deleteContents();
+        } else {
+          const frag = range.extractContents();
+          if (frag && frag.querySelectorAll) {
+            frag.querySelectorAll("a").forEach((innerA) => {
+              while (innerA.firstChild) innerA.parentNode.insertBefore(innerA.firstChild, innerA);
+              innerA.parentNode.removeChild(innerA);
+            });
+          }
+          if (frag && frag.textContent && frag.textContent.trim()) {
+            a.appendChild(frag);
+          } else {
+            a.textContent = label;
+          }
+        }
+        range.insertNode(a);
+      } else {
+        a.textContent = label;
+        range.deleteContents();
+        range.insertNode(a);
+      }
+
+      try {
+        const nextRange = document.createRange();
+        nextRange.setStartAfter(a);
+        nextRange.collapse(true);
+        const sel = window.getSelection();
+        if (sel) {
+          sel.removeAllRanges();
+          sel.addRange(nextRange);
+        }
+      } catch (e) { /* ignore selection positioning */ }
+    } else {
+      restoreRange();
+      if (!document.execCommand("insertHTML", false, anchorHtml)) {
+        const a = document.createElement("a");
+        a.href = url;
+        a.textContent = label;
+        editor.appendChild(a);
+      }
+    }
+  } catch (error) {
+    restoreRange();
+    document.execCommand("insertHTML", false, anchorHtml);
+  }
+
+  state.selectedText = "";
+  state.range = null;
   captureTemplate();
+  updatePreview();
 }
 
 function readyGa4Link() {
   const values = readGa4Builder();
-  if (!/^https?:\/\//i.test(values.url)) throw new Error("Enter a website address that starts with https://");
-  if (!values.campaign) throw new Error("Name the campaign so GA4 can group these visits.");
+  let url = (values.url || "").trim();
+  if (!url) throw new Error("Enter or paste a website address.");
+  if (!/^https?:\/\//i.test(url)) {
+    url = "https://" + url;
+    values.url = url;
+    const urlField = document.getElementById("ga4-url");
+    if (urlField) urlField.value = url;
+  }
+  if (!values.source) values.source = "parth-mailing";
+  if (!values.medium) values.medium = "email";
+  if (!values.campaign) {
+    const tpl = activeTemplate();
+    values.campaign = (tpl && tpl.name ? tpl.name.toLowerCase().replace(/[^a-z0-9]+/g, "-") : "") || "campaign";
+  }
   const link = buildGa4Link(values);
-  if (!link.includes("utm_")) throw new Error("Add a source, medium, or campaign so the link can be tracked.");
   rememberGa4Builder(values);
   return { values, link };
 }
@@ -2386,25 +2589,54 @@ function paintFullPreview() {
   const pick = document.getElementById("preview-pick");
   const index = pick ? Number(pick.value) || 0 : state.previewIndex || 0;
   state.previewIndex = index;
+
+  const prevBtn = document.querySelector('[data-action="preview-prev"]');
+  const nextBtn = document.querySelector('[data-action="preview-next"]');
+  const countLabel = document.getElementById("preview-count");
+  if (prevBtn) prevBtn.disabled = index <= 0;
+  if (nextBtn) nextBtn.disabled = index >= rows.length - 1;
+  if (countLabel && rows.length) countLabel.textContent = `${(index + 1).toLocaleString()} of ${rows.length.toLocaleString()}`;
+
   const row = rows[index];
   if (!row) {
-    if (meta) meta.textContent = "Import Excel, then open Preview.";
+    if (meta) meta.innerHTML = `<span class="preview-pill"><i data-lucide="info"></i>No recipients imported yet. Upload Excel to preview personalized emails.</span>`;
     armExternalLinks(frame);
-    frame.srcdoc = externalPreviewHtml("<p style='font-family:sans-serif;padding:24px'>No recipients yet.</p>");
+    frame.srcdoc = externalPreviewHtml("<p style='font-family:sans-serif;padding:32px;color:#555;'>No recipients yet. Go to <strong>Import</strong> to upload an Excel file or connect a Google Sheet.</p>");
+    icons();
     return;
   }
-  const editor = document.getElementById("editor");
   const subjectField = document.getElementById("subject-input");
-  const templateField = fieldOf(row, "Template") || row.template || "";
-  const source = templateField && templateField.includes("<") ? templateField : composerHtml();
+  const matched = resolveRowTemplate(row);
+  const active = activeTemplate();
+  let source = "";
+  let subjectText = (subjectField && subjectField.value) || "";
+  if (matched) {
+    source = matched.rawHtml || matched.html || "";
+    if (matched.subject) subjectText = matched.subject;
+  }
+  if (!source) source = composerHtml();
   const html = tagHtmlLinks(linkUnsubscribeHtml(applyVars(source, row), row.email), Object.assign({}, state.tracking, { enabled: !!state.tracking.enabled }));
-  const subject = applyVars((subjectField && subjectField.value) || "", row);
+  const subject = applyVars(subjectText, row);
   const fromName = rowSenderName(row) || "Assigned mailbox";
   const fromMail = rowSendingAccount(row) || state.sheetMailbox || "";
   const copy = looseField(row, CC_KEYS);
-  if (meta) meta.textContent = `Sender email: ${fromMail || "empty"} · Receiver email: ${row.email || "empty"} · From name: ${fromName} · Subject: ${subject || "(no subject)"}${copy ? " · CC: " + copy : ""}`;
+  const rawTpl = rowTemplateName(row);
+  const tplLabel = matched ? matched.name : (rawTpl ? `${rawTpl} (unmatched)` : (active ? active.name : "Default"));
+
+  if (meta) {
+    meta.innerHTML = `
+      <div class="preview-meta-bar">
+        <span class="preview-pill" title="Template used for this recipient"><i data-lucide="file-text"></i><strong>${esc(tplLabel)}</strong></span>
+        <span class="preview-pill" title="Sender mailbox"><i data-lucide="mail"></i>From: ${esc(fromMail || "Assigned mailbox")}</span>
+        <span class="preview-pill" title="Sender display name"><i data-lucide="user"></i>Name: ${esc(fromName)}</span>
+        <span class="preview-pill" title="Receiver email"><i data-lucide="send"></i>To: ${esc(row.email || "")}</span>
+        ${subject ? `<span class="preview-pill preview-pill-subject" title="Subject"><i data-lucide="heading"></i>${esc(subject)}</span>` : ""}
+        ${copy ? `<span class="preview-pill" title="CC"><i data-lucide="copy"></i>CC: ${esc(copy)}</span>` : ""}
+      </div>`;
+    icons();
+  }
   armExternalLinks(frame);
-  frame.srcdoc = externalPreviewHtml(html || "<p style='font-family:sans-serif;padding:24px'>Open Composer and write a message.</p>");
+  frame.srcdoc = externalPreviewHtml(html || "<p style='font-family:sans-serif;padding:32px;color:#555;'>Open Composer and write a message or choose a template.</p>");
 }
 
 function maskAddress(value) {
@@ -2703,6 +2935,27 @@ const actions = {
     if (state.view === "master" || state.view === "config") await refreshMaster();
     renderView();
   },
+  "preview-prev"() {
+    const pick = document.getElementById("preview-pick");
+    if (!pick) return;
+    const current = Number(pick.value) || 0;
+    if (current > 0) {
+      pick.value = current - 1;
+      state.previewIndex = current - 1;
+      paintFullPreview();
+    }
+  },
+  "preview-next"() {
+    const pick = document.getElementById("preview-pick");
+    if (!pick) return;
+    const current = Number(pick.value) || 0;
+    const rows = mergedRecipients();
+    if (current < rows.length - 1) {
+      pick.value = current + 1;
+      state.previewIndex = current + 1;
+      paintFullPreview();
+    }
+  },
   async "save-account-limits"() {
     const gmail = Number((document.getElementById("gmail-daily-cap") || {}).value);
     const workspace = Number((document.getElementById("workspace-daily-cap") || {}).value);
@@ -2942,7 +3195,10 @@ const actions = {
     document.execCommand("createLink", false, url);
   },
   "insert-var"(el) { insertToken(el.dataset.token); },
-  "open-ga4"() { openGa4Builder(); },
+  "open-ga4"() {
+    saveRange();
+    openGa4Builder();
+  },
   "insert-unsubscribe"() {
     insertBuiltLink(unsubscribeHref(), "click here to unsubscribe");
     toast("Unsubscribe link inserted. The reader’s email app opens a message to conference.ictcs@gmail.com.");
@@ -2956,9 +3212,9 @@ const actions = {
   },
   "ga4-insert"() {
     const { values, link } = readyGa4Link();
-    insertBuiltLink(link, values.text);
     finishModal(true);
     setComposerMode("max");
+    insertBuiltLink(link, values.text);
     toast("Tracked link inserted");
   },
   "toggle-cc"() { document.getElementById("cc-fields").classList.toggle("hidden"); },
@@ -3013,6 +3269,16 @@ const actions = {
     applyTemplate(state.templates[0]);
     persistTemplates();
     renderTemplates();
+  },
+  async "template-rename"() {
+    const current = activeTemplate();
+    if (!current) return;
+    const name = await askText("Template name", current.name || "Template");
+    if (!name || !name.trim()) return;
+    current.name = name.trim().slice(0, 40);
+    persistTemplates();
+    renderTemplates();
+    toast(`Template renamed to "${current.name}"`);
   },
   async "template-html"() {
     if (state.templates.length >= 30) throw new Error("30 templates is the limit. Delete one to add another.");
@@ -3173,7 +3439,8 @@ document.addEventListener("click", async (event) => {
 
 document.addEventListener("mousedown", (event) => {
   state.lastInteract = Date.now();
-  if (!event.target.closest("#toolbar, #var-bar")) return;
+  const tool = event.target.closest("#toolbar, #var-bar, [data-action='open-ga4'], [data-action='insert-link'], [data-action='insert-unsubscribe']");
+  if (!tool) return;
   saveRange();
   if (event.target.closest("select, input, textarea, label")) return;
   event.preventDefault();
@@ -3319,7 +3586,12 @@ document.getElementById("login-code").addEventListener("input", () => {
   paintLoginButton();
 });
 
-document.getElementById("editor").addEventListener("input", updatePreview);
+const editorEl = document.getElementById("editor");
+if (editorEl) {
+  editorEl.addEventListener("input", updatePreview);
+  editorEl.addEventListener("mouseup", saveRange);
+  editorEl.addEventListener("keyup", saveRange);
+}
 
 setInterval(tickClock, 250);
 tickClock();
